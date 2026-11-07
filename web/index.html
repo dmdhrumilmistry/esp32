@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src wss:; img-src 'self' data:; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="theme-color" content="#2563eb">
+<meta name="referrer" content="no-referrer">
+<title>p2ptun connect</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1b1f24;--mute:#667085;--line:#e4e7ec;--acc:#2563eb;--ok:#16a34a;--bad:#dc2626;--warn:#b45309;--code:#f1f3f6}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--fg:#e6e8eb;--mute:#98a2b3;--line:#2a2f3a;--acc:#60a5fa;--ok:#22c55e;--bad:#f87171;--warn:#fbbf24;--code:#11141a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:0 0 10px}
+.sub{color:var(--mute);margin:0 0 18px;font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.k{color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all}
+label{display:block;font-size:13px;color:var(--mute);margin:10px 0 4px}
+input,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+textarea{font-family:ui-monospace,Menlo,monospace;font-size:12px;min-height:110px}
+button{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;cursor:pointer}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button.danger{color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.hide{display:none}
+.pill{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.pill.ok{color:var(--ok);border-color:var(--ok)}.pill.warn{color:var(--warn);border-color:var(--warn)}
+.msg{margin-top:8px;font-size:13px}.err{color:var(--bad)}.good{color:var(--ok)}
+.note{border-left:3px solid var(--warn);padding:6px 10px;margin:10px 0;font-size:14px;background:var(--code);border-radius:4px}
+#log{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--mute);white-space:pre-wrap;margin-top:10px}
+details{border-top:1px solid var(--line);padding:8px 0}details summary{cursor:pointer;font-weight:500}
+ol{padding-left:20px;margin:6px 0}code{font-family:ui-monospace,Menlo,monospace;font-size:13px}
+.qr{margin-top:14px}.qr p{margin:0}
+.qr svg{display:block;width:100%;max-width:320px;height:auto;aspect-ratio:1/1;margin:8px 0}
+.step{display:inline-flex;width:22px;height:22px;border-radius:50%;background:var(--acc);color:#fff;font-size:13px;align-items:center;justify-content:center;margin-right:6px}
+</style>
+</head>
+<body>
+<main>
+  <h1>🔐 p2ptun connect</h1>
+  <p class="sub">Get a WireGuard config for your ESP32 p2ptun device from any phone or computer. Your key is created and kept in this browser. Relays only carry an encrypted note, and there's no server in between.</p>
+
+  <section class="card hide" id="pair-card" style="border-color:var(--acc)">
+    <h2>📲 Pair this device</h2>
+    <p>You were invited to <b id="pair-dev"></b> as <b id="pair-name"></b>.</p>
+    <div id="pair-newkey">
+      <p class="sub" style="margin:0">A new WireGuard key will be created in this browser. Optionally protect it with a passphrase:</p>
+      <label>Passphrase (optional)</label><input id="pair-pass" type="password" autocomplete="new-password">
+    </div>
+    <div id="pair-oldkey" class="hide"><p class="sub" style="margin:0">Your existing key will be used.</p>
+      <div id="pair-unlock" class="hide"><label>Passphrase</label><input id="pair-unlock-pass" type="password" autocomplete="current-password"></div></div>
+    <div class="row"><button id="pair-go" class="primary">Pair</button><button id="pair-cancel">Not now</button></div>
+    <div id="pair-log"></div>
+    <div class="msg" id="m-pair"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">1</span>Your key</h2>
+    <div id="key-none">
+      <p class="sub" style="margin:0">Create a WireGuard key for this phone or computer. A passphrase is optional; it encrypts the key in this browser's storage.</p>
+      <label>Passphrase (optional)</label><input id="gen-pass" type="password" autocomplete="new-password">
+      <label>Repeat passphrase</label><input id="gen-pass2" type="password" autocomplete="new-password">
+      <div class="row"><button id="gen" class="primary">Create key</button></div>
+      <details><summary>Import an existing private key</summary>
+        <label>WireGuard private key (base64)</label><input id="imp-key" autocomplete="off">
+        <div class="row"><button id="imp">Import</button></div>
+      </details>
+      <div class="msg" id="m-key"></div>
+    </div>
+    <div id="key-have" class="hide">
+      <div class="k">Public key: paste it into the device web UI → “Authorize a client”</div>
+      <div class="mono" id="pub" style="margin:6px 0"></div>
+      <div class="row"><button id="copy-pub" class="primary">Copy public key</button><span id="key-prot" class="pill"></span></div>
+      <div class="row"><button id="export">Download key backup</button><button id="forget" class="danger">Forget key</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">2</span>Device config</h2>
+    <div id="dev-none">
+      <p class="sub" style="margin:0">After you authorize the key, the device shows a config. Paste it here (the JSON or the whole <code>p2ptun.py join</code> line).</p>
+      <textarea id="dev-text" placeholder='{"name":"phone","address":"10.77.0.4/32","device":{...},"relays":[...]}'></textarea>
+      <div class="row"><button id="dev-save" class="primary">Save</button></div>
+      <div class="msg" id="m-dev"></div>
+    </div>
+    <div id="dev-have" class="hide">
+      <div class="mono" id="dev-summary"></div>
+      <div class="row"><button id="dev-change">Change</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step">3</span>Connect</h2>
+    <div id="unlock-row" class="hide"><label>Passphrase</label><input id="unlock-pass" type="password" autocomplete="current-password"></div>
+    <div class="row"><button id="go" class="primary">Get WireGuard config</button></div>
+    <div id="log"></div>
+    <div class="msg" id="m-go"></div>
+    <div id="result" class="hide">
+      <div class="row"><span class="k">Endpoint</span><span class="mono" id="r-ep"></span><span id="r-via" class="pill"></span></div>
+      <div id="r-notes"></div>
+      <label>WireGuard config (contains your private key: don't share it)</label>
+      <textarea id="r-conf" readonly></textarea>
+      <div class="row"><button id="dl" class="primary">Download p2ptun.conf</button><button id="copy-conf">Copy</button></div>
+      <div id="r-qr-box" class="qr hide">
+        <div class="k">Scan with the WireGuard app</div>
+        <div id="r-qr"></div>
+        <p class="sub">On the phone open WireGuard → <b>+</b> → <b>Scan from QR code</b>. The code contains your private key: only show it to your own device.</p>
+      </div>
+      <div style="margin-top:12px">
+        <details><summary>Android</summary><ol><li>Install <b>WireGuard</b> from Google Play or F-Droid.</li><li>Tap <b>Download p2ptun.conf</b>.</li><li>In WireGuard tap <b>+</b> → <b>Import from file or archive</b> → pick the file → turn it on.</li></ol></details>
+        <details><summary>iPhone / iPad</summary><ol><li>Install <b>WireGuard</b> from the App Store.</li><li>Tap <b>Download p2ptun.conf</b> (it goes to Files → Downloads).</li><li>In WireGuard tap <b>+</b> → <b>Create from file or archive</b> → pick the file → allow the VPN → turn it on.</li></ol></details>
+        <details><summary>Windows</summary><ol><li>Install WireGuard from wireguard.com/install.</li><li>Download the config, then in WireGuard click <b>Import tunnel(s) from file</b> → <b>Activate</b>.</li></ol></details>
+        <details><summary>macOS</summary><ol><li>Install <b>WireGuard</b> from the Mac App Store.</li><li>Download the config, then <b>Import Tunnel(s) from File</b> → <b>Activate</b>.</li></ol></details>
+        <details><summary>Linux</summary><ol><li><code>sudo cp p2ptun.conf /etc/wireguard/ &amp;&amp; sudo wg-quick up p2ptun</code></li><li>Or use <code>client/p2ptun.py up</code>, which also hole-punches when the device has no router mapping.</li></ol></details>
+      </div>
+      <p class="sub" style="margin-top:10px">The config stays valid until the device's public address changes. If it stops connecting, come back and get a fresh one.</p>
+    </div>
+  </section>
+  <p class="sub">Open-source: firmware, protocol and this page live in the p2ptun repository. Your key never leaves this browser. The page sends only encrypted pairing/knock messages to the relays in your device config, plus a WebRTC STUN request to stun.l.google.com / stun.cloudflare.com to learn this network's public IP (which those servers therefore see).</p>
+</main>
+<script src="p2ptun-proto.js"></script>
+<script src="qr.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

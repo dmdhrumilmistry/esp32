@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """p2ptun client: connect to an ESP32 p2ptun device peer-to-peer, no server of your own.
 
+  python3 p2ptun.py pair '<invite link>'      # easiest: one-time invite from the device web UI
   python3 p2ptun.py genkey            # create p2ptun.json with a new WireGuard key, print the public key
   python3 p2ptun.py join '<json>'     # paste the config the device's web UI shows after you authorize the key
   sudo python3 p2ptun.py up           # Linux: rendezvous via Nostr, hole-punch, bring up WireGuard, stay connected
-  python3 p2ptun.py resolve           # any OS: rendezvous and print a wg-quick config to import right away
+  python3 p2ptun.py resolve -o p2ptun.conf   # any OS: rendezvous and write a config for the WireGuard app
+
+Phones (Android/iOS) and any other OS can also use the browser client in web/ (no Python needed).
 
 See ../docs/PROTOCOL.md for how it works.
 """
@@ -14,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -53,8 +57,8 @@ def load_cfg(path: Path) -> dict:
 
 
 def save_cfg(path: Path, cfg: dict):
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # holds a private key
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)  # private key
     with os.fdopen(fd, "w") as f:
         json.dump(cfg, f, indent=2)
     os.replace(tmp, path)
@@ -100,14 +104,13 @@ def cmd_join(args):
 # rendezvous over Nostr
 # ---------------------------------------------------------------------------
 
-async def rendezvous(cfg: dict, my_ep: str, lan_ep: str | None, timeout: float = 25.0) -> dict:
+async def exchange(cfg: dict, key: bytes, message: dict, accept, timeout: float, timeout_msg: str):
+    """Seal `message` with `key`, send it to the device via all relays, return accept(reply) for the
+    first reply that opens with `key` and for which accept() returns non-None (accept may raise)."""
     if websockets is None:
         die("pip install websockets")
-    priv = proto.unb64(cfg["private_key"], 32)
     dev = cfg["device"]
-    key = proto.envelope_key(priv, proto.unb64(dev["wg_pub"], 32))
-
-    # Fresh throwaway Nostr identity per knock: relays can't link sessions to this client.
+    # Fresh throwaway Nostr identity per message: relays can't link sessions to this client.
     while True:
         esk = os.urandom(32)
         try:
@@ -115,9 +118,7 @@ async def rendezvous(cfg: dict, my_ep: str, lan_ep: str | None, timeout: float =
             break
         except ValueError:
             continue
-
-    knock, nonce = proto.make_knock(my_ep, lan_ep)
-    content = proto.envelope_seal(key, json.dumps(knock, separators=(",", ":")).encode())
+    content = proto.envelope_seal(key, json.dumps(message, separators=(",", ":")).encode())
     event = proto.nostr_event(esk, proto.NOSTR_KIND, int(time.time()), dev["nostr_pub"], content)
 
     loop = asyncio.get_running_loop()
@@ -128,23 +129,29 @@ async def rendezvous(cfg: dict, my_ep: str, lan_ep: str | None, timeout: float =
             async with websockets.connect(url, open_timeout=8, close_timeout=2) as ws:
                 sub = os.urandom(4).hex()
                 await ws.send(json.dumps(["REQ", sub, {"kinds": [proto.NOSTR_KIND], "#p": [epub],
-                                                       "since": int(time.time()) - 10}]))
+                                                       "since": int(time.time()) - proto.MAX_CLOCK_SKEW}]))
                 await ws.send(json.dumps(["EVENT", event]))
                 async for raw in ws:
                     msg = json.loads(raw)
                     if msg[0] == "OK" and msg[1] == event["id"] and not msg[2]:
-                        log(f"{url} rejected knock: {msg[3] if len(msg) > 3 else ''}")
+                        log(f"{url} rejected the message: {msg[3] if len(msg) > 3 else ''}")
                     elif msg[0] == "EVENT" and len(msg) == 3:
                         ev = msg[2]
                         if ev.get("kind") != proto.NOSTR_KIND or ev.get("pubkey") != dev["nostr_pub"]:
                             continue
                         try:
-                            ack = proto.parse_ack(proto.envelope_open(key, ev["content"]), nonce)
+                            reply = json.loads(proto.envelope_open(key, ev["content"]))
                         except Exception:
-                            continue  # not for us / forged / stale
-                        if not result.done():
-                            result.set_result(ack)
-                        return
+                            continue  # not for us / forged
+                        try:
+                            value = accept(reply)
+                        except Exception as e:
+                            if not result.done():
+                                result.set_exception(e)
+                            return
+                        if value is not None and not result.done():
+                            result.set_result(value)
+                            return
         except Exception as e:  # one relay failing is fine
             log(f"relay {url}: {type(e).__name__}: {e}")
 
@@ -152,10 +159,45 @@ async def rendezvous(cfg: dict, my_ep: str, lan_ep: str | None, timeout: float =
     try:
         return await asyncio.wait_for(result, timeout)
     except asyncio.TimeoutError:
-        die("no answer from the device (offline? key not authorized or blocked? clock wrong?)")
+        die(timeout_msg)
     finally:
         for t in tasks:
             t.cancel()
+
+
+async def rendezvous(cfg: dict, my_ep: str, lan: str | None, timeout: float = 25.0) -> dict:
+    priv = proto.unb64(cfg["private_key"], 32)
+    key = proto.envelope_key(priv, proto.unb64(cfg["device"]["wg_pub"], 32))
+    knock, nonce = proto.make_knock(my_ep, lan)
+
+    def accept(m):
+        if m.get("v") != proto.PROTO_VERSION or m.get("t") != "ack" or m.get("n") != nonce:
+            return None
+        if abs(int(m.get("ts", 0)) - time.time()) > proto.MAX_CLOCK_SKEW:
+            return None
+        return m
+    return await exchange(cfg, key, knock, accept, timeout,
+                          "no answer from the device (offline? key not authorized or blocked? clock wrong?)")
+
+
+async def pair_with(invite: dict, priv: bytes, timeout: float = 25.0) -> dict:
+    key = proto.pair_key(invite["secret"])
+    nonce = os.urandom(8).hex()
+    msg = {"v": proto.PROTO_VERSION, "t": "pair", "ts": int(time.time()), "n": nonce,
+           "pub": proto.b64(proto.wg_pubkey(priv))}
+
+    def accept(m):
+        if m.get("v") != proto.PROTO_VERSION or m.get("n") != nonce:
+            return None
+        if abs(int(m.get("ts", 0)) - time.time()) > proto.MAX_CLOCK_SKEW:
+            return None
+        if m.get("t") == "pair-error":
+            raise RuntimeError(f"pairing refused by the device: {m.get('error', 'unknown reason')}")
+        if m.get("t") == "paired" and re.fullmatch(r"\d+\.\d+\.\d+\.\d+/32", str(m.get("address", ""))):
+            return m
+        return None
+    return await exchange(invite["cfg"], key, msg, accept, timeout,
+                          "no answer from the device (offline? invite expired or already used?)")
 
 
 def discover(port: int, stun: list[str]) -> tuple[str, str]:
@@ -176,12 +218,15 @@ def discover(port: int, stun: list[str]) -> tuple[str, str]:
 def pick_endpoint(ack: dict, my_ep: str) -> str:
     dev_ep, dev_lan = ack.get("ep") or "", ack.get("lan") or ""
     my_ip = my_ep.rpartition(":")[0]
-    if dev_lan and (not dev_ep or dev_ep.rpartition(":")[0] == my_ip):
+    # Same public IP as the device => same network; most routers can't hairpin, so use the LAN
+    # address. pub_ip comes from the device's STUN (works when ep is a DDNS name, too).
+    dev_pub_ip = ack.get("pub_ip") or dev_ep.rpartition(":")[0]
+    if dev_lan and my_ip and dev_pub_ip == my_ip:
         log("device is behind the same NAT; using its LAN address")
         proto.parse_endpoint(dev_lan)
         return dev_lan
     if not dev_ep:
-        die("device doesn't know its public endpoint yet (STUN blocked on its network?)")
+        die("device doesn't know a reachable address yet (STUN blocked on its network?)")
     proto.parse_endpoint(dev_ep)
     return dev_ep
 
@@ -191,8 +236,10 @@ def knock(cfg: dict, args) -> tuple[str, str, str]:
     log(f"my public endpoint {my_ep} (LAN {lan})")
     ack = asyncio.run(rendezvous(cfg, my_ep, lan))
     ep = pick_endpoint(ack, my_ep)
-    log(f"device answered: {ack.get('ep') or '?'} → using {ep}")
-    return ep, my_ep, lan
+    via = ack.get("via", "stun")
+    how = "router port mapping" if via in ("upnp", "natpmp") else "manual endpoint" if via == "manual" else "hole punching"
+    log(f"device answered: {ack.get('ep') or '?'} via {how} → using {ep}")
+    return ep, my_ep, lan, via
 
 # ---------------------------------------------------------------------------
 # Linux WireGuard plumbing
@@ -243,7 +290,7 @@ def cmd_up(args):
     require_joined(cfg)
     dev_pub = cfg["device"]["wg_pub"]
 
-    ep, my_ep, lan = knock(cfg, args)
+    ep, my_ep, lan, _ = knock(cfg, args)
     wg_up(cfg, args.iface, args.port, ep)
 
     stop = False
@@ -285,22 +332,57 @@ def cmd_up(args):
 def cmd_resolve(args):
     cfg = load_cfg(Path(args.config))
     require_joined(cfg)
-    ep, _, _ = knock(cfg, args)
+    ep, _, _, via = knock(cfg, args)
     dev = cfg["device"]
     allowed = ", ".join([dev["tunnel_ip"] + "/32"] + dev.get("routes", []))
-    print(f"""
-# Import into WireGuard within ~30 s; ListenPort MUST stay {args.port} (the NAT mapping we just punched).
-[Interface]
+    direct = via in proto.DIRECT_VIA
+    head = ("# The device is directly reachable: this config keeps working until its public address changes.\n"
+            if direct else
+            f"# Hole punching: import into WireGuard within ~30 s; ListenPort MUST stay {args.port}.\n")
+    listen = "" if direct else f"ListenPort = {args.port}\n"
+    conf = f"""{head}[Interface]
 PrivateKey = {cfg['private_key']}
 Address = {cfg['address']}
-ListenPort = {args.port}
-
+{listen}
 [Peer]
 PublicKey = {dev['wg_pub']}
 Endpoint = {ep}
 AllowedIPs = {allowed}
 PersistentKeepalive = 25
-""")
+"""
+    if args.out:
+        # Contains the private key: write a fresh 0600 file and rename it over the target, so an
+        # existing file's permissions (or a symlink at the path) are never reused.
+        out = Path(args.out)
+        tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(conf)
+        os.replace(tmp, out)
+        log(f"wrote {args.out}: import it into the WireGuard app")
+    else:
+        print("\n" + conf)
+
+
+def cmd_pair(args):
+    path = Path(args.config)
+    cfg = json.loads(path.read_text()) if path.exists() else {}
+    invite = proto.parse_invite(args.invite)
+    if "private_key" not in cfg:
+        cfg["private_key"] = proto.b64(proto.wg_genkey())
+        save_cfg(path, cfg)
+        log(f"new key written to {path} (mode 600)")
+    priv = proto.unb64(cfg["private_key"], 32)
+    log(f"pairing with device {invite['cfg']['device']['wg_pub'][:12]}… as '{invite['name']}'")
+    try:
+        reply = asyncio.run(pair_with(invite, priv))
+    except RuntimeError as e:
+        die(str(e))
+    cfg.update({"name": reply.get("name", invite["name"]), "address": reply["address"],
+                "device": invite["cfg"]["device"], "relays": invite["cfg"]["relays"]})
+    save_cfg(path, cfg)
+    log(f"paired ✔ as {cfg['name']} ({cfg['address']}); config saved to {path}")
+    log("next: sudo python3 p2ptun.py up   (Linux)   or   python3 p2ptun.py resolve -o p2ptun.conf")
 
 
 def cmd_show(args):
@@ -322,9 +404,14 @@ def main():
         p.add_argument("--stun", nargs="+", default=DEFAULT_STUN, metavar="HOST:PORT")
         if name == "up":
             p.add_argument("--iface", default=DEFAULT_IFACE)
+        else:
+            p.add_argument("-o", "--out", help="write the config to this file (mode 600) instead of printing it")
+    pr = sub.add_parser("pair", help="pair using an invite link/QR from the device web UI")
+    pr.add_argument("invite", help="the invite link (https://…#p2ptun=…) or its p2ptun= value")
     sub.add_parser("pubkey", help="print this client's public key")
     args = ap.parse_args()
-    {"genkey": cmd_genkey, "join": cmd_join, "up": cmd_up, "resolve": cmd_resolve, "pubkey": cmd_show}[args.cmd](args)
+    {"genkey": cmd_genkey, "join": cmd_join, "up": cmd_up, "resolve": cmd_resolve, "pubkey": cmd_show,
+     "pair": cmd_pair}[args.cmd](args)
 
 
 if __name__ == "__main__":

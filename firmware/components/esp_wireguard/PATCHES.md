@@ -11,3 +11,10 @@ Upstream: https://github.com/trombik/esp_wireguard @ `9217c5be0836e908005301ad2c
      hole punching).
    - `wireguardif_send_raw()`: send a datagram (a STUN request) from the WireGuard socket.
    - `wireguardif_get_peer_stats()`: per-peer endpoint, last rx/tx and session state for the web UI.
+3. **Bug fix, cryptokey routing on receive:** upstream compared the decrypted packet's *destination*
+   with the sending peer's allowed IPs. WireGuard requires the *source* to be checked. Upstream
+   only worked because its client mode allows `0.0.0.0/0`. With per-peer `/32` allowed IPs
+   (server mode), every packet to the LAN was dropped and peers could spoof source addresses. It now
+   checks `iphdr->src`.
+4. `wireguardif_set_rx_filter()`: hook called for every decrypted packet that passed the source
+   check, before `ip_input()`. p2ptun uses it for per-peer access rules (ACLs).

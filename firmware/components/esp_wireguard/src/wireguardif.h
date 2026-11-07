@@ -150,6 +150,12 @@ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *cu
 typedef bool (*wireguardif_raw_rx_fn)(const uint8_t *data, size_t len, const ip_addr_t *addr, u16_t port);
 void wireguardif_set_raw_rx_hook(wireguardif_raw_rx_fn fn);
 
+// Called (in the TCPIP thread) for every decrypted inner packet that passed the cryptokey
+// routing check, before it enters the IP stack. Return false to drop it.
+// peer_index is the index returned by wireguardif_add_peer; pkt points to the IP header.
+typedef bool (*wireguardif_rx_filter_fn)(u8_t peer_index, const uint8_t *pkt, size_t len);
+void wireguardif_set_rx_filter(wireguardif_rx_filter_fn fn);
+
 // Send a raw datagram from the WireGuard UDP port. Must run in the TCPIP thread.
 err_t wireguardif_send_raw(struct netif *netif, const ip_addr_t *ip, u16_t port, const uint8_t *data, size_t len);
 

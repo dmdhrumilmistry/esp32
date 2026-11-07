@@ -5,6 +5,8 @@ through the firmware's C code built for the host (tests/host/p2p_host), so this 
 ESP32 and the client really understand each other over a relay that verifies signatures.
 """
 import asyncio
+import base64
+import os
 import json
 import subprocess
 import sys
@@ -96,6 +98,43 @@ class SimDevice:
         self.public_ep = "198.51.100.20:51820"
         self.punched = []
         self.last_ts = {}
+        self.invites = {}  # secret hex -> {"name", "used_by", "address"}
+        self.next_host = 10
+
+    def add_invite(self, name):
+        secret = os.urandom(16)
+        self.invites[secret.hex()] = {"name": name, "used_by": None, "address": None}
+        blob = {"v": 1, "name": name, "secret": base64.urlsafe_b64encode(secret).decode().rstrip("="),
+                "device": {"wg_pub": proto.b64(self.pub), "nostr_pub": self.npub, "tunnel_ip": "10.77.0.1",
+                           "routes": ["192.168.1.0/24"]},
+                "relays": ["wss://relay.invalid"]}  # tests swap in the local ws:// relay after parsing
+        enc = base64.urlsafe_b64encode(json.dumps(blob, separators=(",", ":")).encode()).decode().rstrip("=")
+        return "https://example.github.io/esp32/#p2ptun=" + enc
+
+    def handle_pair(self, ev):
+        """Device-side pairing rules from docs/PROTOCOL.md, crypto via the firmware C code."""
+        for sec, inv in self.invites.items():
+            rc, pt = c("pairopen", sec, ev["content"])
+            if rc != 0:
+                continue
+            m = json.loads(pt)
+            if m.get("t") != "pair" or abs(m["ts"] - time.time()) > 120:
+                return None
+            pub = proto.unb64(m["pub"], 32)
+            if inv["used_by"] is None:
+                inv["used_by"], inv["address"] = pub, f"10.77.0.{self.next_host}/32"
+                self.next_host += 1
+                self.authorized.append(pub)
+                reply = {"t": "paired", "address": inv["address"], "name": inv["name"]}
+            elif inv["used_by"] == pub:
+                reply = {"t": "paired", "address": inv["address"], "name": inv["name"]}
+            else:
+                reply = {"t": "pair-error", "error": "invite already used"}
+            reply.update({"v": 1, "ts": int(time.time()), "n": m["n"]})
+            _, content = c("pairseal", sec, json.dumps(reply, separators=(",", ":")))
+            _, out = c("event", self.nsk, str(proto.NOSTR_KIND), str(int(time.time())), ev["pubkey"], content)
+            return json.loads(out)
+        return None
 
     async def run(self, ready: asyncio.Event):
         async with websockets.connect(self.url) as ws:
@@ -106,6 +145,11 @@ class SimDevice:
                 if msg[0] != "EVENT":
                     continue
                 ev = msg[2]
+                if not any(c("open", proto.b64(self.priv), proto.b64(p), ev["content"])[0] == 0 for p in self.authorized):
+                    out = self.handle_pair(ev)
+                    if out:
+                        await ws.send(json.dumps(["EVENT", out]))
+                    continue
                 for pub in self.authorized:
                     rc, pt = c("open", proto.b64(self.priv), proto.b64(pub), ev["content"])
                     if rc != 0:
@@ -114,9 +158,10 @@ class SimDevice:
                     if knock["t"] != "knock" or knock["ts"] <= self.last_ts.get(pub, 0):
                         break
                     self.last_ts[pub] = knock["ts"]
-                    self.punched.append(knock["ep"])
+                    self.punched.append(knock.get("ep"))
                     ack = json.dumps({"v": 1, "t": "ack", "ts": int(time.time()), "n": knock["n"],
-                                      "ep": self.public_ep, "lan": "192.168.1.50:51820"}, separators=(",", ":"))
+                                      "ep": self.public_ep, "via": "stun",
+                                      "lan": "192.168.1.50:51820"}, separators=(",", ":"))
                     _, content = c("seal", proto.b64(self.priv), proto.b64(pub), ack)
                     _, out = c("event", self.nsk, str(proto.NOSTR_KIND), str(int(time.time())), ev["pubkey"], content)
                     await ws.send(json.dumps(["EVENT", json.loads(out)]))

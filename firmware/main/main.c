@@ -5,6 +5,7 @@
 //
 // See README.md and docs/PROTOCOL.md.
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -17,6 +18,8 @@
 
 #include "p2p_config.h"
 #include "p2p_crypto.h"
+#include "p2p_events.h"
+#include "p2p_portmap.h"
 #include "p2p_signal.h"
 #include "p2p_tunnel.h"
 #include "p2p_web.h"
@@ -52,8 +55,41 @@ static void reset_button_task(void *arg)
     }
 }
 
+// Revokes time-limited peers once their expiry passes (checked every 15 s).
+static void expiry_task(void *arg)
+{
+    static p2p_peer_t expired[P2P_MAX_PEERS];
+    for (;; vTaskDelay(pdMS_TO_TICKS(15000))) {
+        time_t now = time(NULL);
+        if (now < 1700000000) {
+            continue; // clock not synced yet (time-limited peers stay unloaded meanwhile, see p2p_tunnel.c)
+        }
+        int n = 0;
+        p2p_config_t *cfg = p2p_config();
+        p2p_config_lock();
+        for (int i = 0; i < P2P_MAX_PEERS; i++) {
+            p2p_peer_t *p = &cfg->peers[i];
+            if (p->host && p->enabled && p->expires && now >= (time_t)p->expires) {
+                p->enabled = 0;
+                expired[n++] = *p;
+            }
+        }
+        if (n) {
+            p2p_config_save_peers();
+        }
+        p2p_config_unlock();
+        if (n) {
+            p2p_tunnel_sync_peers(); // cuts their live sessions
+            for (int i = 0; i < n; i++) {
+                p2p_event("access for '%s' expired: peer blocked", expired[i].name);
+            }
+        }
+    }
+}
+
 void app_main(void)
 {
+    p2p_events_init();
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -99,6 +135,8 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(p2p_tunnel_start());
+    ESP_ERROR_CHECK(p2p_portmap_start());
+    xTaskCreate(expiry_task, "expiry", 3072, NULL, 3, NULL);
     ESP_ERROR_CHECK(p2p_signal_start());
     ESP_ERROR_CHECK(p2p_web_start(false));
     ESP_LOGI(TAG, "ready: manage peers at http://<device-ip>/ (LAN) or http://%s.1/ (tunnel)",
