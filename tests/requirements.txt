@@ -1,2 +1,5 @@
 # test-only extras (client deps are installed from client/requirements.txt)
 coincurve>=20
+# tests/test_qr.py: decode the web client's QR codes with a real decoder
+zxing-cpp>=3.1
+numpy>=1.24

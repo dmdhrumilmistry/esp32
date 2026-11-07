@@ -81,6 +81,8 @@ class TestQr(unittest.TestCase):
         # Byte capacity per (version, level) as the encoder computes it; spot-checked against the
         # standard's table and proven by the decode sweeps below.
         cls.caps = {(int(k[:-1]), k[-1]): n for k, n in node({"cmd": "capacity"}).items()}
+        # Same with the 12-bit UTF-8 ECI header that non-ASCII strings carry.
+        cls.caps_eci = {(int(k[:-1]), k[-1]): n for k, n in node({"cmd": "capacity", "eci": True}).items()}
 
     def assertScans(self, r, data, ecc):
         """r (harness result) decodes with zxing-cpp to exactly `data` at level `ecc`."""
@@ -102,11 +104,20 @@ class TestQr(unittest.TestCase):
             self.assertEqual(int(extra["DataMask"]), r["mask"])
         return got
 
+    def assertSameModules(self, got, want):
+        # Not assertEqual: unittest's difflib message for long, mostly-equal row strings is quadratic.
+        self.assertEqual(len(got), len(want), "matrix size")
+        diff = [(y, x) for y, (a, b) in enumerate(zip(got, want)) for x in range(max(len(a), len(b)))
+                if a[x:x + 1] != b[x:x + 1]]
+        if diff:
+            self.fail(f"{len(diff)} modules differ (row, column): {diff[:8]}")
+
     def test_short_ascii(self):
         for text in ["A", "hello", "p2ptun says hi!"]:
             with self.subTest(text=text):
                 r = node({"text": text})
                 self.assertEqual(r["ecc"], "M")  # default level
+                self.assertFalse(r["eci"])  # ASCII: plain byte mode, no ECI header
                 self.assertEqual(r["version"], 1 if len(text) <= 14 else 2)
                 self.assertEqual(self.assertScans(r, text.encode(), "M").text, text)
 
@@ -119,6 +130,7 @@ class TestQr(unittest.TestCase):
             for ecc in LEVELS:
                 with self.subTest(ecc=ecc, conf=conf[:40]):
                     r = node({"text": conf, "ecc": ecc})
+                    self.assertFalse(r["eci"])
                     got = self.assertScans(r, conf.encode(), ecc)
                     self.assertEqual(got.text, conf)
                     if ecc == "M":  # what the page uses: small enough to scan off a laptop screen
@@ -132,12 +144,42 @@ class TestQr(unittest.TestCase):
         for req, r in zip(reqs, encode_many(reqs)):
             with self.subTest(text=req["text"][:20], ecc=req["ecc"]):
                 data = req["text"].encode("utf-8")
-                self.assertEqual(r["version"], min(v for v in range(1, 41) if self.caps[(v, req["ecc"])] >= len(data)))
+                self.assertTrue(r["eci"])
+                self.assertEqual(r["version"], min(v for v in range(1, 41) if self.caps_eci[(v, req["ecc"])] >= len(data)))
                 self.assertEqual(self.assertScans(r, data, req["ecc"]).text, req["text"])
+
+    def test_utf8_eci_matches_reference_encoder(self):
+        """Non-ASCII strings carry ECI 26 (UTF-8) so decoders don't guess Shift-JIS: bit-identical to
+        zxing-cpp's writer, which emits that ECI for this text; without the ECI the symbol differs."""
+        try:
+            zxingcpp.create_barcode("x", zxingcpp.BarcodeFormat.QRCode, ec_level="M", version=1, data_mask=0)
+        except (TypeError, ValueError, AttributeError) as e:  # pragma: no cover
+            self.skipTest(f"zxing-cpp writer lacks version/data_mask options: {e}")
+        text = "€uro ✓"
+        for v, e, k in ((1, "L", 0), (2, "M", 3), (2, "M", 7), (7, "Q", 5), (10, "H", 2)):
+            with self.subTest(version=v, ecc=e, mask=k):
+                ref = zxingcpp.create_barcode(text, zxingcpp.BarcodeFormat.QRCode, ec_level=e, version=v, data_mask=k)
+                img = np.array(ref.to_image(scale=1, add_quiet_zones=False))
+                rows = ["".join("1" if px < 128 else "0" for px in row) for row in img]
+                r = node({"text": text, "ecc": e, "mask": k, "min_version": v})
+                self.assertTrue(r["eci"])
+                self.assertSameModules(r["modules"], rows)
+                plain = node({"text": text, "ecc": e, "mask": k, "min_version": v, "eci": False})
+                self.assertFalse(plain["eci"])
+                self.assertNotEqual(plain["modules"], rows)
+                self.assertEqual(self.assertScans(plain, text.encode(), e).text, text)
+
+    def test_eci_capacity(self):
+        for v in range(1, 41):
+            for e in LEVELS:
+                # 12 header bits cost one byte, or two when the byte-mode bits have < 4 spare bits.
+                self.assertIn(self.caps[(v, e)] - self.caps_eci[(v, e)], (1, 2), f"{v}-{e}")
+        self.assertEqual(self.caps_eci[(40, "H")], 1272)
 
     def test_raw_bytes(self):
         data = bytes(range(256))
         r = node({"hex": data.hex(), "ecc": "L"})
+        self.assertFalse(r["eci"])  # bytes are not assumed to be UTF-8
         self.assertScans(r, data, "L")
 
     def test_capacity_matches_standard(self):
@@ -201,21 +243,24 @@ class TestQr(unittest.TestCase):
                                               version=req["min_version"], data_mask=req["mask"])
                 img = np.array(ref.to_image(scale=1, add_quiet_zones=False))
                 rows = ["".join("1" if px < 128 else "0" for px in row) for row in img]
-                self.assertEqual(r["modules"], rows)
+                self.assertSameModules(r["modules"], rows)
 
     def test_over_capacity_throws(self):
         cases = [("x" * 2954, "L", 2953), ("x" * 2332, "M", 2331), ("x" * 1664, "Q", 1663),
-                 ("x" * 1274, "H", 1273), ("€" * 425, "H", 1273)]  # 425 chars but 1275 UTF-8 bytes
+                 ("x" * 1274, "H", 1273),
+                 ("€" * 424 + "x", "H", 1272)]  # 425 chars, 1273 UTF-8 bytes: too many with the ECI header
         for text, ecc, cap in cases:
             with self.subTest(ecc=ecc, len=len(text)):
                 r = node({"text": text, "ecc": ecc})
                 self.assertIn("error", r)
                 self.assertIn("too long", r["error"])
                 self.assertIn(str(cap), r["error"])
-        self.assertEqual(node({"text": "€" * 424 + "x", "ecc": "H"})["version"], 40)  # 1273 bytes: fits
+        self.assertEqual(node({"text": "€" * 424, "ecc": "H"})["version"], 40)  # 1272 bytes + ECI: fits
+        self.assertEqual(node({"text": "€" * 424 + "x", "ecc": "H", "eci": False})["version"], 40)  # 1273, no ECI
 
     def test_bad_options_throw(self):
-        for req in ({"text": "x", "ecc": "Z"}, {"text": "x", "mask": 8}, {"text": "x", "min_version": 41}):
+        for req in ({"text": "x", "ecc": "Z"}, {"text": "x", "mask": 8}, {"text": "x", "min_version": 41},
+                    {"text": "x", "eci": 1}):
             with self.subTest(req=req):
                 self.assertIn("error", node(req))
 
@@ -224,8 +269,13 @@ class TestQr(unittest.TestCase):
         self.assertEqual((r["version"], r["size"]), (1, 21))
 
     def test_svg(self):
-        scale, margin = 5, 4
+        for scale, margin in ((5, 4), (1, 0), (3, 2)):
+            with self.subTest(scale=scale, margin=margin):
+                self.check_svg(scale, margin)
+
+    def check_svg(self, scale, margin):
         out = node({"cmd": "svg", "text": WG_CONF, "scale": scale, "margin": margin})
+        self.assertNotIn("error", out)
         qr, svg = out["qr"], out["svg"]
         ns = "http://www.w3.org/2000/svg"
         dim = qr["size"] + 2 * margin
@@ -244,20 +294,55 @@ class TestQr(unittest.TestCase):
         # Rasterize the path (horizontal runs of dark modules) and compare with the module matrix.
         d = path["attrs"]["d"]
         runs = re.findall(r"M(\d+),(\d+)h(\d+)v1h-(\d+)z", d)
-        self.assertEqual("".join(f"M{x},{y}h{n}v1h-{m}z" for x, y, n, m in runs), d)
+        self.assertTrue("".join(f"M{x},{y}h{n}v1h-{m}z" for x, y, n, m in runs) == d, "unexpected path data")
         canvas = np.zeros((dim, dim), dtype=bool)
         for x, y, n, m in runs:
             x, y, n = int(x), int(y), int(n)
             self.assertEqual(n, int(m))
             self.assertFalse(canvas[y, x:x + n].any(), "overlapping runs")
             canvas[y, x:x + n] = True
-        self.assertFalse(canvas[:margin].any() or canvas[-margin:].any() or canvas[:, :margin].any()
-                         or canvas[:, -margin:].any(), "dark modules in the quiet zone")
-        inner = ["".join("1" if c else "0" for c in row[margin:-margin]) for row in canvas[margin:-margin]]
-        self.assertEqual(inner, qr["modules"])
-        img = np.ascontiguousarray(np.repeat(np.repeat(np.where(canvas, 0, 255).astype(np.uint8), scale, 0), scale, 1))
-        found = decode(img)
-        self.assertEqual([f.text for f in found], [WG_CONF])
+        inner = canvas[margin:dim - margin, margin:dim - margin]
+        self.assertEqual(int(canvas.sum()), int(inner.sum()), "dark modules in the quiet zone")
+        self.assertSameModules(["".join("1" if c else "0" for c in row) for row in inner], qr["modules"])
+        img = np.pad(np.where(canvas, 0, 255).astype(np.uint8), 4 - margin, constant_values=255)
+        img = np.ascontiguousarray(np.repeat(np.repeat(img, 4, 0), 4, 1))
+        self.assertEqual([f.text for f in decode(img)], [WG_CONF])
+
+
+class TestQrPage(unittest.TestCase):
+    """index.html/app.js wiring (static checks; the encoder itself is tested above)."""
+
+    def test_page_loads_qr_before_app(self):
+        page = (ROOT / "web" / "index.html").read_text()
+        scripts = re.findall(r'<script src="([^"]+)"></script>', page)
+        self.assertEqual(scripts, ["p2ptun-proto.js", "qr.js", "app.js"])
+        result = page[page.index('<div id="result"'):]
+        self.assertIn('id="r-qr-box"', result)
+        self.assertIn('id="r-qr"', result)
+        self.assertIn("script-src 'self'", page)
+
+    def test_result_cleared_when_key_or_device_changes(self):
+        """The config text and QR carry the private key: "Forget key", a new/imported key and a device
+        config change must hide and empty them (and void a "Get config" still in flight)."""
+        src = (ROOT / "web" / "app.js").read_text()
+        clear = src[src.index("function clearResult()"):]
+        clear = clear[:clear.index("\n  }\n")]
+        for needle in ('resultGen++', 'show("result", false)', '$("r-conf").value = ""', 'showQr("")'):
+            self.assertIn(needle, clear)
+        for start in ('$("forget").onclick', '$("dev-save").onclick', '$("dev-change").onclick',
+                      'async function storeKey(', '$("go").onclick'):
+            with self.subTest(handler=start):
+                body = src[src.index(start):]
+                body = body[:body.index("\n  }")]
+                self.assertIn("clearResult()", body)
+        go = src[src.index('$("go").onclick'):]
+        self.assertLess(go.index("if (gen !== resultGen) return"), go.index("showQr(conf)"))
+
+    def test_no_inner_html(self):
+        for name in ("qr.js", "app.js"):
+            src = (ROOT / "web" / name).read_text()
+            for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "eval(", "new Function"):
+                self.assertNotIn(bad, src, f"{name} uses {bad}")
 
 
 if __name__ == "__main__":

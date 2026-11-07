@@ -1,17 +1,18 @@
 // Node CLI around web/qr.js for tests/test_qr.py. Reads a JSON request on stdin, writes JSON on stdout.
-//   {text, ecc?, mask?, min_version?}  or {hex, ...} (raw bytes)
-//     -> {size, version, ecc, mask, modules: ["0101..", ...]} or {error}
+//   {text, ecc?, mask?, min_version?, eci?}  or {hex, ...} (raw bytes)
+//     -> {size, version, ecc, mask, eci, modules: ["0101..", ...]} or {error}
 //   {items: [request, ...]}            -> {results: [result, ...]}
 //   {cmd: "svg", text, ecc?, scale?, margin?} -> {qr: result, svg: element tree built via a fake document}
-//   {cmd: "capacity"}                  -> {"1L": 17, "1M": 14, ..., "40H": 1273} (byte-mode capacity)
+//   {cmd: "capacity", eci?}            -> {"1L": 17, "1M": 14, ..., "40H": 1273} (byte-mode capacity,
+//                                         with room for the UTF-8 ECI header when eci is true)
 "use strict";
 const QR = require("../web/qr.js");
 
 function encode(req) {
   const data = req.hex !== undefined ? Uint8Array.from(Buffer.from(req.hex, "hex")) : req.text;
-  const qr = QR.encode(data, { ecc: req.ecc, mask: req.mask, minVersion: req.min_version });
+  const qr = QR.encode(data, { ecc: req.ecc, mask: req.mask, minVersion: req.min_version, eci: req.eci });
   return {
-    size: qr.size, version: qr.version, ecc: qr.ecc, mask: qr.mask,
+    size: qr.size, version: qr.version, ecc: qr.ecc, mask: qr.mask, eci: qr.eci,
     modules: qr.modules.map((row) => row.map((on) => (on ? "1" : "0")).join("")),
   };
 }
@@ -39,7 +40,7 @@ function run(req) {
   if (req.items) return { results: req.items.map(one) };
   if (req.cmd === "capacity") {
     const caps = {};
-    for (let v = 1; v <= 40; v++) for (const e of "LMQH") caps[v + e] = QR.byteCapacity(v, e);
+    for (let v = 1; v <= 40; v++) for (const e of "LMQH") caps[v + e] = QR.byteCapacity(v, e, !!req.eci);
     return caps;
   }
   if (req.cmd === "svg") {

@@ -2,7 +2,8 @@
  *
  * Used to show the WireGuard config so the phone app can import it with "+ -> Scan from QR code".
  * Byte mode (UTF-8), versions 1-40, error correction L/M/Q/H, mask chosen by the standard
- * penalty rules. Works in browsers (window.P2PQR) and Node (require), which the tests use.
+ * penalty rules. Strings with non-ASCII characters get an ECI 26 (UTF-8) header, since byte mode
+ * otherwise means ISO-8859-1 and some decoders guess Shift-JIS; ASCII text (WireGuard configs) has none. Works in browsers (window.P2PQR) and Node (require), which the tests use.
  *
  *   const qr = P2PQR.encode(text, { ecc: "M" });  // {size, modules[y][x], version, ecc, mask}
  *   el.append(P2PQR.toSvg(qr, document, { scale: 4, margin: 4 }));
@@ -84,37 +85,22 @@
   const totalCodewords = (v) => rawDataModules(v) >> 3;
   const dataCodewords = (v, ecc) => totalCodewords(v) - ECC_PER_BLOCK[ecc][v] * NUM_BLOCKS[ecc][v];
   const countBits = (v) => (v <= 9 ? 8 : 16); // byte mode character count indicator length
-  // Bytes that fit in byte mode: mode indicator (4 bits) + count + 8 bits per byte.
-  const byteCapacity = (v, ecc) => (dataCodewords(v, ecc) * 8 - 4 - countBits(v)) >> 3;
+  // Bytes that fit in byte mode: mode indicator (4 bits) + count + 8 bits per byte, after an
+  // optional ECI header (eci = true: 4-bit ECI mode indicator + 8-bit designator).
+  const ECI_UTF8 = 26, ECI_BITS = 12;
+  const byteCapacity = (v, ecc, eci) => (dataCodewords(v, ecc) * 8 - (eci ? ECI_BITS : 0) - 4 - countBits(v)) >> 3;
 
   // ------------------------------------------------------------------ codewords
-  function utf8(text) {
-    if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text);
-    const out = [];
-    for (let i = 0; i < text.length; i++) {
-      let c = text.charCodeAt(i);
-      if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
-        const d = text.charCodeAt(i + 1);
-        if (d >= 0xdc00 && d <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00); i++; }
-      }
-      if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd; // lone surrogate, as TextEncoder does
-      if (c < 0x80) out.push(c);
-      else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-      else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-      else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-    }
-    return Uint8Array.from(out);
-  }
-
   // Data codewords (byte mode segment, terminator, padding) split into blocks, each followed by
   // its Reed-Solomon codewords, interleaved as in ISO/IEC 18004 7.6.
-  function codewords(bytes, v, ecc) {
+  function codewords(bytes, v, ecc, eci) {
     const nData = dataCodewords(v, ecc);
     const data = new Uint8Array(nData);
     let bit = 0;
     const put = (val, len) => {
       for (let i = len - 1; i >= 0; i--, bit++) if ((val >>> i) & 1) data[bit >> 3] |= 0x80 >> (bit & 7);
     };
+    if (eci) { put(0b0111, 4); put(ECI_UTF8, 8); } // ECI designator 26 = UTF-8 (fits in one byte)
     put(0b0100, 4);
     put(bytes.length, countBits(v));
     for (const b of bytes) put(b, 8);
@@ -174,7 +160,7 @@
       case 4: return (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
       case 5: return ((x * y) % 2) + ((x * y) % 3) === 0;
       case 6: return (((x * y) % 2) + ((x * y) % 3)) % 2 === 0;
-      case 7: return (((x + y) % 2) + ((x * y) % 3)) % 2 === 1;
+      case 7: return (((x + y) % 2) + ((x * y) % 3)) % 2 === 0;
     }
     throw new Error("bad mask");
   }
@@ -304,7 +290,8 @@
   // ------------------------------------------------------------------ API
   // text: string (encoded as UTF-8) or bytes (Uint8Array / array of 0..255).
   // opts.ecc: "L" | "M" (default) | "Q" | "H"; opts.mask: 0..7 to force a mask (default: best);
-  // opts.minVersion: smallest version to consider (default 1).
+  // opts.minVersion: smallest version to consider (default 1);
+  // opts.eci: true/false to force the UTF-8 ECI header on/off (default: only for non-ASCII strings).
   function encode(text, opts) {
     const o = opts || {};
     const ecc = o.ecc === undefined ? "M" : String(o.ecc).toUpperCase();
@@ -312,24 +299,26 @@
     const minVersion = o.minVersion === undefined ? 1 : o.minVersion;
     if (!Number.isInteger(minVersion) || minVersion < 1 || minVersion > 40) throw new Error("QR: minVersion must be 1..40");
     if (o.mask !== undefined && !(Number.isInteger(o.mask) && o.mask >= 0 && o.mask <= 7)) throw new Error("QR: mask must be 0..7");
+    if (o.eci !== undefined && typeof o.eci !== "boolean") throw new Error("QR: eci must be true or false");
 
     let bytes;
-    if (typeof text === "string") bytes = utf8(text);
+    if (typeof text === "string") bytes = new TextEncoder().encode(text); // UTF-8
     else if (text && typeof text.length === "number") {
       bytes = Uint8Array.from(text);
       if (bytes.some((b, i) => b !== text[i])) throw new Error("QR: byte values must be 0..255");
     } else throw new Error("QR: text must be a string or bytes");
+    const eci = o.eci === undefined ? typeof text === "string" && bytes.some((b) => b >= 0x80) : o.eci;
 
     let version = 0;
     for (let v = minVersion; v <= 40; v++) {
-      if (bytes.length <= byteCapacity(v, ecc)) { version = v; break; }
+      if (bytes.length <= byteCapacity(v, ecc, eci)) { version = v; break; }
     }
     if (!version) {
-      throw new Error(`QR: data too long (${bytes.length} bytes; at most ${byteCapacity(40, ecc)} fit at error correction level ${ecc})`);
+      throw new Error(`QR: data too long (${bytes.length} bytes; at most ${byteCapacity(40, ecc, eci)} fit at error correction level ${ecc})`);
     }
 
     const mx = new Matrix(version);
-    mx.placeData(codewords(bytes, version, ecc));
+    mx.placeData(codewords(bytes, version, ecc, eci));
     let mask = o.mask;
     if (mask === undefined) {
       let best = Infinity;
@@ -343,7 +332,7 @@
     }
     mx.applyMask(mask);
     mx.drawFormat(formatBits(ecc, mask));
-    return { size: mx.size, modules: mx.dark, version, ecc, mask };
+    return { size: mx.size, modules: mx.dark, version, ecc, mask, eci };
   }
 
   // SVG for a QR from encode(): white background (quiet zone included) and one path of dark

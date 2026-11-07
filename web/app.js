@@ -30,6 +30,34 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
+  // QR code of the exact config text for the phone's WireGuard app ("+ → Scan from QR code").
+  // Hidden when there is no config, qr.js didn't load or the text doesn't fit.
+  function showQr(text) {
+    const slot = $("r-qr");
+    slot.textContent = "";
+    let ok = false;
+    if (text && typeof P2PQR === "object") {
+      try {
+        const qr = P2PQR.encode(text, { ecc: "M" });
+        slot.append(P2PQR.toSvg(qr, document, { scale: 4, margin: 4, label: "QR code of the WireGuard config" }));
+        ok = true;
+      } catch (e) {
+        slot.textContent = "";
+      }
+    }
+    show("r-qr-box", ok);
+  }
+
+  // Hides and empties the result (config text and QR both carry the private key). Called whenever
+  // the key or device config changes; bumping resultGen also discards a "Get config" still running.
+  let resultGen = 0;
+  function clearResult() {
+    resultGen++;
+    show("result", false);
+    $("r-conf").value = "";
+    showQr("");
+  }
+
   function render() {
     const hasKey = !!state.pub;
     show("key-none", !hasKey); show("key-have", hasKey);
@@ -55,6 +83,7 @@
     if (pass) state.locked = await P2P.lockKey(priv, pass);
     else state.priv = P2P.b64(priv);
     save(state);
+    clearResult();
     render();
   }
 
@@ -89,23 +118,24 @@
   };
   $("forget").onclick = () => {
     if (!confirm("Delete this key from the browser? Also delete or block it on the device.")) return;
-    state = {}; save(state); render();
+    state = {}; save(state); clearResult(); render();
   };
 
   $("dev-save").onclick = () => {
     try {
       state.config = P2P.parseDeviceConfig($("dev-text").value);
-      save(state); msg("m-dev", ""); render();
+      save(state); msg("m-dev", ""); clearResult(); render();
     } catch (e) { msg("m-dev", e.message); }
   };
   $("dev-change").onclick = () => {
     $("dev-text").value = state.config ? JSON.stringify(state.config) : "";
-    delete state.config; save(state); render();
+    delete state.config; save(state); clearResult(); render();
   };
 
   $("go").onclick = async () => {
     const log = (line) => { $("log").textContent += line + "\n"; };
-    $("log").textContent = ""; msg("m-go", ""); show("result", false);
+    $("log").textContent = ""; msg("m-go", ""); clearResult();
+    const gen = resultGen;
     $("go").disabled = true;
     try {
       const priv = await privateKey();
@@ -117,6 +147,7 @@
       const ack = await P2P.rendezvous(state.config, priv, { ep: myIp ? `${myIp}:${PUNCH_PORT}` : undefined, log });
       log(`device answered (${ack.via || "?"})`);
       const pick = P2P.pickEndpoint(ack, myIp);
+      if (gen !== resultGen) return; // key or device config changed (e.g. "Forget key") meanwhile
       const conf = P2P.wgConfig(P2P.b64(priv), state.config, pick.endpoint, pick.direct ? null : PUNCH_PORT);
       $("r-ep").textContent = pick.endpoint;
       $("r-via").textContent = { upnp: "router mapping (UPnP)", natpmp: "router mapping (NAT-PMP)", manual: "manual endpoint",
@@ -125,12 +156,13 @@
       const notes = $("r-notes"); notes.textContent = "";
       for (const n of pick.notes) { const d = document.createElement("div"); d.className = "note"; d.textContent = n; notes.append(d); }
       $("r-conf").value = conf;
+      showQr(conf);
       show("result", true);
       $("result").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) {
-      msg("m-go", e.message);
+      if (gen === resultGen) msg("m-go", e.message);
     } finally {
-      $("go").disabled = false;
+      $("go").disabled = !(state.pub && state.config);
     }
   };
   $("dl").onclick = () => download("p2ptun.conf", $("r-conf").value);

@@ -33,6 +33,8 @@ button:disabled{opacity:.5;cursor:default}
 #log{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--mute);white-space:pre-wrap;margin-top:10px}
 details{border-top:1px solid var(--line);padding:8px 0}details summary{cursor:pointer;font-weight:500}
 ol{padding-left:20px;margin:6px 0}code{font-family:ui-monospace,Menlo,monospace;font-size:13px}
+.qr{margin-top:14px}.qr p{margin:0}
+.qr svg{display:block;width:100%;max-width:320px;height:auto;aspect-ratio:1/1;margin:8px 0}
 .step{display:inline-flex;width:22px;height:22px;border-radius:50%;background:var(--acc);color:#fff;font-size:13px;align-items:center;justify-content:center;margin-right:6px}
 </style>
 </head>
@@ -88,6 +90,11 @@ ol{padding-left:20px;margin:6px 0}code{font-family:ui-monospace,Menlo,monospace;
       <label>WireGuard config (contains your private key: don't share it)</label>
       <textarea id="r-conf" readonly></textarea>
       <div class="row"><button id="dl" class="primary">Download p2ptun.conf</button><button id="copy-conf">Copy</button></div>
+      <div id="r-qr-box" class="qr hide">
+        <div class="k">Scan with the WireGuard app</div>
+        <div id="r-qr"></div>
+        <p class="sub">On the phone open WireGuard → <b>+</b> → <b>Scan from QR code</b>. The code contains your private key: only show it to your own device.</p>
+      </div>
       <div style="margin-top:12px">
         <details><summary>Android</summary><ol><li>Install <b>WireGuard</b> from Google Play or F-Droid.</li><li>Tap <b>Download p2ptun.conf</b>.</li><li>In WireGuard tap <b>+</b> → <b>Import from file or archive</b> → pick the file → turn it on.</li></ol></details>
         <details><summary>iPhone / iPad</summary><ol><li>Install <b>WireGuard</b> from the App Store.</li><li>Tap <b>Download p2ptun.conf</b> (it goes to Files → Downloads).</li><li>In WireGuard tap <b>+</b> → <b>Create from file or archive</b> → pick the file → allow the VPN → turn it on.</li></ol></details>
@@ -101,6 +108,7 @@ ol{padding-left:20px;margin:6px 0}code{font-family:ui-monospace,Menlo,monospace;
   <p class="sub">Open-source: firmware, protocol and this page live in the p2ptun repository. Nothing here is sent anywhere except the encrypted knock to the relays listed in your device config.</p>
 </main>
 <script src="p2ptun-proto.js"></script>
+<script src="qr.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
