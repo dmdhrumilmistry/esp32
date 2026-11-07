@@ -25,6 +25,7 @@
 #include "p2p_stun.h"
 #include "p2p_portmap_proto.h"
 #include "p2p_acl.h"
+#include "p2p_wol.h"
 
 static int urandom(void *ctx, unsigned char *out, size_t len)
 {
@@ -242,6 +243,14 @@ int main(int argc, char **argv)
         if (n > sizeof(pkt)) return 2;
         hexarg(argv[5], pkt, n);
         puts(p2p_acl_allows(&acl, &env, pkt, n) ? "allow" : "deny");
+    } else if (!strcmp(cmd, "wol") && argc == 3) {
+        uint8_t mac[6], pkt[P2P_WOL_PACKET_LEN];
+        char norm[18], h[2 * P2P_WOL_PACKET_LEN + 1];
+        if (!p2p_parse_mac(argv[2], mac)) return 3;
+        p2p_format_mac(mac, norm);
+        p2p_wol_packet(mac, pkt);
+        p2p_hex_encode(pkt, sizeof(pkt), h);
+        printf("%s %s\n", norm, h);
     } else if (!strcmp(cmd, "private") && argc == 3) {
         unsigned a, b, c, d;
         if (sscanf(argv[2], "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 2;

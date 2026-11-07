@@ -10,6 +10,13 @@
 #define P2P_MAX_PEERS CONFIG_WIREGUARD_MAX_PEERS
 #define P2P_NAME_LEN 24
 
+#define P2P_MAX_WOL 8
+
+typedef struct {
+    char name[P2P_NAME_LEN];
+    uint8_t mac[6];
+} p2p_wol_t;
+
 typedef struct {
     char name[P2P_NAME_LEN];
     uint8_t pub[32];   // client's WireGuard public key
@@ -29,7 +36,9 @@ typedef struct {
     uint8_t wg_priv[32];
     char relays[256];
     char ep_override[72];
-    char web_client[128];   // browser client URL for invite links   // "host:port" advertised instead of auto-detected endpoint ("" = auto)
+    char web_client[128];   // browser client URL for invite links
+    bool ui_tunnel_only;    // admin UI reachable only from inside the tunnel
+    p2p_wol_t wol[P2P_MAX_WOL]; // Wake-on-LAN targets (name[0] == 0: empty)   // "host:port" advertised instead of auto-detected endpoint ("" = auto)
     p2p_peer_t peers[P2P_MAX_PEERS];
 } p2p_config_t;
 
@@ -43,6 +52,8 @@ esp_err_t p2p_config_save_admin(const uint8_t salt[16], const uint8_t hash[32]);
 esp_err_t p2p_config_save_relays(const char *relays);
 esp_err_t p2p_config_save_ep_override(const char *ep);
 esp_err_t p2p_config_save_web_client(const char *url);
+esp_err_t p2p_config_save_ui_tunnel_only(bool on);
+esp_err_t p2p_config_save_wol(void);       // caller holds the lock
 esp_err_t p2p_config_save_peers(void);     // caller holds the lock
 esp_err_t p2p_config_factory_reset(void);
 

@@ -487,6 +487,8 @@ static esp_err_t do_status(void *arg)
     uint32_t last = st.last_rx > st.last_handshake_rx ? st.last_rx : st.last_handshake_rx;
     s->out->last_rx_s = last ? (int32_t)((sys_now() - last) / 1000) : -1;
     s->out->denied = s_loaded[i].denied;
+    s->out->rx_bytes = st.rx_bytes;
+    s->out->tx_bytes = st.tx_bytes;
     strlcpy(s->out->last_denied, s_loaded[i].last_denied, sizeof(s->out->last_denied));
     return ESP_OK;
 }

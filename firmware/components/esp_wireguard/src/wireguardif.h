@@ -167,6 +167,8 @@ struct wireguardif_peer_stats {
 	uint32_t last_rx;  // sys_now() ms of last data/keepalive received (0 = never)
 	uint32_t last_tx;
 	uint32_t last_handshake_rx; // sys_now() ms of last valid initiation received
+	uint64_t rx_bytes;          // data payload bytes received / sent since the peer was loaded
+	uint64_t tx_bytes;
 };
 // Read per-peer counters. Must run in the TCPIP thread.
 err_t wireguardif_get_peer_stats(struct netif *netif, u8_t peer_index, struct wireguardif_peer_stats *out);

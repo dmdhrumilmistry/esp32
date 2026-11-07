@@ -18,3 +18,5 @@ Upstream: https://github.com/trombik/esp_wireguard @ `9217c5be0836e908005301ad2c
    checks `iphdr->src`.
 4. `wireguardif_set_rx_filter()`: hook called for every decrypted packet that passed the source
    check, before `ip_input()`. p2ptun uses it for per-peer access rules (ACLs).
+5. Per-peer traffic counters (`rx_bytes` / `tx_bytes` on `struct wireguard_peer`), exposed through
+   `wireguardif_get_peer_stats()` for the web UI.

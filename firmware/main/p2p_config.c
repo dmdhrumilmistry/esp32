@@ -86,6 +86,11 @@ esp_err_t p2p_config_load(void)
     get_str(h, "relays", s_cfg.relays, sizeof(s_cfg.relays));
     get_str(h, "ep_override", s_cfg.ep_override, sizeof(s_cfg.ep_override));
     get_str(h, "webclient", s_cfg.web_client, sizeof(s_cfg.web_client));
+    uint8_t lock = 0;
+    s_cfg.ui_tunnel_only = nvs_get_u8(h, "ui_lock", &lock) == ESP_OK && lock == 1;
+    if (get_blob(h, "wol", s_cfg.wol, sizeof(s_cfg.wol)) != ESP_OK) {
+        memset(s_cfg.wol, 0, sizeof(s_cfg.wol));
+    }
     if (s_cfg.web_client[0] == '\0') {
         strlcpy(s_cfg.web_client, CONFIG_P2PTUN_WEB_CLIENT_URL, sizeof(s_cfg.web_client));
     }
@@ -171,6 +176,29 @@ esp_err_t p2p_config_save_web_client(const char *url)
     strlcpy(copy, s_cfg.web_client, sizeof(copy));
     p2p_config_unlock();
     return commit("webclient", NULL, 0, copy);
+}
+
+esp_err_t p2p_config_save_ui_tunnel_only(bool on)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(h, "ui_lock", on ? 1 : 0);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        s_cfg.ui_tunnel_only = on;
+    }
+    return err;
+}
+
+esp_err_t p2p_config_save_wol(void)
+{
+    return commit("wol", s_cfg.wol, sizeof(s_cfg.wol), NULL);
 }
 
 esp_err_t p2p_config_save_peers(void)

@@ -156,6 +156,20 @@ td.v{word-break:normal;white-space:nowrap}
   </div>
 
   <div class="card">
+    <h2>Wake-on-LAN</h2>
+    <p class="k" style="text-transform:none">Wake computers on the device's LAN, from anywhere through the tunnel. The machine needs Wake-on-LAN enabled in its BIOS/OS.</p>
+    <div id="wol-list"></div>
+    <form id="f-wol" style="margin-top:8px">
+      <div class="grid">
+        <div><label>Name</label><input name="name" required maxlength="23" pattern="[A-Za-z0-9 _.\-]+" placeholder="desktop"></div>
+        <div><label>MAC address</label><input name="mac" required maxlength="17" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off"></div>
+      </div>
+      <div class="row" style="margin-top:12px"><button>Add machine</button></div>
+      <div class="msg" id="m-wol"></div>
+    </form>
+  </div>
+
+  <div class="card">
     <div class="row" style="justify-content:space-between"><h2>Security events</h2><span class="k" style="text-transform:none">since last boot</span></div>
     <div id="events"></div>
   </div>
@@ -174,6 +188,13 @@ td.v{word-break:normal;white-space:nowrap}
         <div class="row" style="margin-top:12px"><button>Save endpoint</button></div>
         <div class="msg" id="m-ep"></div>
         <p class="k" style="text-transform:none">Only needed if you forward UDP manually on your router (or use DDNS). Applies immediately.</p>
+      </form>
+      <form id="f-lock">
+        <label>Admin UI access</label>
+        <label style="display:flex;gap:8px;align-items:center;color:var(--fg)"><input type="checkbox" name="tunnel_only" style="width:auto"> Only through the tunnel (block LAN access)</label>
+        <p class="k" style="text-transform:none;margin:4px 0 0" id="lock-hint"></p>
+        <div class="row" style="margin-top:8px"><button>Save</button></div>
+        <div class="msg" id="m-lock"></div>
       </form>
       <form id="f-wc">
         <label>Browser client URL (for invite links)</label><input name="url" maxlength="127" placeholder="https://you.github.io/esp32/">
@@ -229,6 +250,29 @@ function renderEvents() {
   const evs = state.events || [];
   if (!evs.length) { box.append(el("p", "No events yet.", "k")); return; }
   for (const e of evs) { const r = el("div", undefined, "ev"); r.append(el("span", when(e), "k"), el("span", e.m)); box.append(r); }
+}
+function bytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + " " + u[i];
+}
+function renderWol() {
+  const box = $("wol-list"); box.textContent = "";
+  for (const w of (state.wol || [])) {
+    const r = el("div", undefined, "ev"); r.style.alignItems = "center";
+    const wake = el("button", "Wake", "primary"); wake.onclick = () => wolAct("wake", w, null);
+    const del = el("button", "Remove", "danger"); del.onclick = () => wolAct("delete", w, `Remove ${w.name}?`);
+    const actions = el("div", undefined, "row"); actions.style.marginTop = "0"; actions.append(wake, del);
+    const label = el("span"); label.style.flex = "1"; label.append(el("div", w.name), el("div", w.mac, "mono-k"));
+    r.append(label, actions); box.append(r);
+  }
+  if (!(state.wol || []).length) box.append(el("p", "No machines saved yet.", "k"));
+}
+async function wolAct(action, w, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  try { await api("/api/wol", {action, mac: w.mac}); msg("m-wol", action === "wake" ? `Magic packet sent to ${w.name}.` : "", true); refresh(); }
+  catch (e) { msg("m-wol", e.message); }
 }
 let currentInvite = null;
 function renderInvites() {
@@ -316,6 +360,7 @@ function render() {
     else if (p.up && p.last_rx_s >= 0 && p.last_rx_s < 180) { cls = "ok"; txt = "connected · " + ago(p.last_rx_s); }
     else if (p.last_rx_s >= 0) { txt = "last seen " + ago(p.last_rx_s); }
     const st = el("td"); st.append(el("span", "", "dot " + cls), el("span", txt));
+    if (p.rx_bytes || p.tx_bytes) st.append(el("div", `↓ ${bytes(p.rx_bytes)} · ↑ ${bytes(p.tx_bytes)}`, "mono-k"));
     if (p.denied) { const d = el("div", `${p.denied} blocked by rules`, "mono-k"); d.title = "last: " + p.last_denied; st.append(d); }
     const acts = el("td"); const row = el("div", undefined, "row");
     const bCfg = el("button", "Config"); bCfg.onclick = () => peerCfg(p);
@@ -329,6 +374,12 @@ function render() {
   }
   renderEvents();
   renderInvites();
+  renderWol();
+  const lk = $("f-lock").tunnel_only;
+  if (document.activeElement !== lk) lk.checked = !!state.ui_tunnel_only;
+  $("lock-hint").textContent = state.via_tunnel
+    ? "You're connected through the tunnel, so you can enable this safely."
+    : "To enable it, open this page through the tunnel (e.g. http://" + state.device.tunnel_ip + "/) so you can't lock yourself out. Factory reset (hold BOOT 5 s) always restores access.";
 }
 
 async function act(what, p, confirmText) {
@@ -389,6 +440,15 @@ form("f-inv", async (v, f) => {
 $("inv-revoke").onclick = async () => { if (!currentInvite) return; try { await api("/api/invites/revoke", {id: currentInvite.id}); refresh(); } catch (e) { alert(e.message); } };
 $("inv-close").onclick = () => { $("inv-box").classList.add("hide"); currentInvite = null; };
 copyBtn("inv-copy", "inv-link", "Copy link");
+form("f-wol", async (v, f) => {
+  try { await api("/api/wol", {action: "add", name: v.name.trim(), mac: v.mac.trim()}); f.reset(); msg("m-wol", ""); refresh(); }
+  catch (e) { msg("m-wol", e.message); }
+});
+form("f-lock", async (v, f) => {
+  const on = f.tunnel_only.checked;
+  if (on && !confirm("Block admin access from the LAN? You'll only be able to manage the device through the tunnel.")) return;
+  try { await api("/api/uilock", {tunnel_only: on}); msg("m-lock", "Saved.", true); refresh(); } catch (e) { msg("m-lock", e.message); }
+});
 form("f-wc", async (v) => {
   try { await api("/api/webclient", {url: v.url.trim()}); msg("m-wc", "Saved.", true); refresh(); } catch (e) { msg("m-wc", e.message); }
 });

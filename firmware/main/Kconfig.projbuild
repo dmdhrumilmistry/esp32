@@ -29,6 +29,12 @@ config P2PTUN_PORTMAP
         stock WireGuard app without hole punching. Only the WireGuard port is mapped; WireGuard
         ignores every packet that isn't from an authorized key.
 
+config P2PTUN_MDNS_HOSTNAME
+    string "mDNS hostname (the admin UI is at http://<name>.local on the LAN)"
+    default "p2ptun"
+    help
+        Leave empty to disable mDNS.
+
 config P2PTUN_WEB_CLIENT_URL
     string "Browser client URL used in invite links"
     default "https://dmdhrumilmistry.github.io/esp32/"
