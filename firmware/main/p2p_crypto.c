@@ -383,6 +383,12 @@ int p2p_envelope_key(const uint8_t my_wg_priv[32], const uint8_t peer_wg_pub[32]
     return ret;
 }
 
+int p2p_pair_key(const uint8_t *secret, size_t secret_len, uint8_t key[32])
+{
+    static const char label[] = "p2ptun-pair-v1";
+    return hmac_sha256(secret, secret_len, (const uint8_t *)label, sizeof(label) - 1, key);
+}
+
 int p2p_envelope_seal(const uint8_t key[32], const uint8_t *pt, size_t pt_len, char *out_b64, size_t out_size)
 {
     uint8_t buf[NONCE_LEN + MAX_ENVELOPE_PT + TAG_LEN];

@@ -48,6 +48,8 @@ int p2p_nostr_event(const uint8_t sk[32], uint32_t kind, uint64_t created_at,
 // key = HMAC-SHA256(key = X25519(my_wg_priv, peer_wg_pub), "p2ptun-signal-v1")
 // Both sides compute the same key from their own WireGuard keys; nothing new to distribute.
 int p2p_envelope_key(const uint8_t my_wg_priv[32], const uint8_t peer_wg_pub[32], uint8_t key[32]);
+// Pairing: key = HMAC-SHA256(key = invite secret, "p2ptun-pair-v1"); used with the same envelope.
+int p2p_pair_key(const uint8_t *secret, size_t secret_len, uint8_t key[32]);
 // content = base64( nonce[12] || ChaCha20-Poly1305(key, nonce, aad="p2ptun-v1", plaintext) || tag[16] )
 int p2p_envelope_seal(const uint8_t key[32], const uint8_t *pt, size_t pt_len, char *out_b64, size_t out_size);
 // Returns plaintext length, or -1 if authentication fails / malformed.

@@ -6,6 +6,7 @@
 //   p2p_host wgpub   <wg_priv_b64>
 //   p2p_host seal    <my_priv_b64> <peer_pub_b64> <plaintext>
 //   p2p_host open    <my_priv_b64> <peer_pub_b64> <content_b64>
+//   p2p_host pairseal <secret_hex> <plaintext> | pairopen <secret_hex> <content_b64>
 //   p2p_host stunreq <txid_hex>
 //   p2p_host stunparse <pkt_hex> <txid_hex>
 //   p2p_host natpmp-map <internal> <external> <lifetime>      -> request hex
@@ -123,6 +124,23 @@ int main(int argc, char **argv)
         if (n < 0) return 3;
         pt[n] = 0;
         puts((char *)pt);
+    } else if ((!strcmp(cmd, "pairseal") || !strcmp(cmd, "pairopen")) && argc == 4) {
+        uint8_t secret[64], key[32];
+        size_t sl = strlen(argv[2]) / 2;
+        if (sl == 0 || sl > sizeof(secret)) return 2;
+        hexarg(argv[2], secret, sl);
+        if (p2p_pair_key(secret, sl, key)) return 1;
+        if (!strcmp(cmd, "pairseal")) {
+            char out[1024];
+            if (p2p_envelope_seal(key, (const uint8_t *)argv[3], strlen(argv[3]), out, sizeof(out))) return 1;
+            puts(out);
+        } else {
+            uint8_t pt[600];
+            int n = p2p_envelope_open(key, argv[3], pt, sizeof(pt) - 1);
+            if (n < 0) return 3;
+            pt[n] = 0;
+            puts((char *)pt);
+        }
     } else if (!strcmp(cmd, "stunreq") && argc == 3) {
         uint8_t txid[12], req[P2P_STUN_REQ_LEN];
         hexarg(argv[2], txid, 12);
