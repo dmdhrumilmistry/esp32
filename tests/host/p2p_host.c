@@ -217,7 +217,7 @@ int main(int argc, char **argv)
             return 4;
         }
         if (acl.all) puts("all"); else printf("%u rules\n", acl.n);
-    } else if (!strcmp(cmd, "acl-check") && argc == 6) {
+    } else if (!strcmp(cmd, "acl-check") && (argc == 6 || argc == 7)) {
         p2p_acl_t acl;
         char err[96];
         if (!p2p_acl_parse(argv[2], &acl, err, sizeof(err))) {
@@ -233,6 +233,10 @@ int main(int argc, char **argv)
         }
         if (sscanf(argv[4], "%u.%u.%u.%u", &a, &b, &cc, &d) != 4) return 2;
         env.dev_ip = (a << 24) | (b << 16) | (cc << 8) | d;
+        if (argc == 7) {
+            if (sscanf(argv[6], "%u.%u.%u.%u", &a, &b, &cc, &d) != 4) return 2;
+            env.dev_lan_ip = (a << 24) | (b << 16) | (cc << 8) | d;
+        }
         uint8_t pkt[256];
         size_t n = strlen(argv[5]) / 2;
         if (n > sizeof(pkt)) return 2;

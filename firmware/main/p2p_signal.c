@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_websocket_client.h"
 #include "esp_crt_bundle.h"
@@ -16,6 +17,7 @@
 #include "p2p_config.h"
 #include "p2p_crypto.h"
 #include "p2p_events.h"
+#include "p2p_invites.h"
 #include "p2p_portmap.h"
 #include "p2p_tunnel.h"
 
@@ -46,6 +48,8 @@ typedef struct {
     uint8_t pub[32];
     uint8_t key[32];
     int64_t last_ts;
+    int64_t reject_logged_us; // last time a rejected knock was logged
+    uint32_t rejects;         // rejected knocks since then
 } peer_state_t;
 static peer_state_t s_pstate[P2P_MAX_PEERS];
 
@@ -146,17 +150,14 @@ static void publish(const char *event_json)
 // ---------------------------------------------------------------------------
 // knock handling
 // ---------------------------------------------------------------------------
-static bool seen_before(const char *id_hex)
+// Dedup on the (encrypted) content, not the event id: ids aren't verified here, so a relay
+// could re-wrap the same knock under new ids to replay it.
+static bool seen_before(const char *content)
 {
-    uint8_t b[8];
-    char head[17];
-    memcpy(head, id_hex, 16);
-    head[16] = '\0';
-    if (!p2p_hex_decode(head, b, 8)) {
-        return true;
+    uint64_t v = 1469598103934665603ULL; // FNV-1a 64
+    for (const unsigned char *p = (const unsigned char *)content; *p; p++) {
+        v = (v ^ *p) * 1099511628211ULL;
     }
-    uint64_t v;
-    memcpy(&v, b, 8);
     for (int i = 0; i < 32; i++) {
         if (s_seen[i] == v) {
             return true;
@@ -231,7 +232,15 @@ static void handle_knock(const p2p_peer_t *peer, peer_state_t *ps, const cJSON *
     // Replay protection: fresh timestamp, strictly increasing per peer.
     int64_t now = time(NULL), t = (int64_t)ts->valuedouble;
     if (!clock_valid() || llabs(now - t) > MAX_SKEW_S || t <= ps->last_ts) {
-        p2p_event("knock from '%s' rejected: stale or replayed (check the client's clock)", peer->name);
+        // Rejected knocks can be replayed by anyone who saw one on a public relay: coalesce them.
+        ps->rejects++;
+        int64_t t_us = esp_timer_get_time();
+        if (ps->reject_logged_us == 0 || t_us - ps->reject_logged_us > 60LL * 1000000) {
+            p2p_event_traffic("%lu stale/replayed knock(s) for '%s' rejected (replay, or the client's clock is off)",
+                              (unsigned long)ps->rejects, peer->name);
+            ps->rejects = 0;
+            ps->reject_logged_us = t_us;
+        }
         return;
     }
     ps->last_ts = t;
@@ -258,19 +267,26 @@ static void handle_knock(const p2p_peer_t *peer, peer_state_t *ps, const cJSON *
             port = lport;
         }
         esp_err_t err = p2p_tunnel_set_endpoint(peer->pub, ip, port);
-        p2p_event("knock from '%s' at %u.%u.%u.%u:%u, punching (%s)", peer->name, ip[0], ip[1], ip[2], ip[3],
+        p2p_event_traffic("knock from '%s' at %u.%u.%u.%u:%u, punching (%s)", peer->name, ip[0], ip[1], ip[2], ip[3],
                   port, esp_err_to_name(err));
         if (err != ESP_OK) {
             return; // peer not loaded in WireGuard
         }
     } else {
-        p2p_event("knock from '%s', answered with %s (%s)", peer->name, my_ep[0] ? my_ep : "?", via);
+        p2p_event_traffic("knock from '%s', answered with %s (%s)", peer->name, my_ep[0] ? my_ep : "?", via);
     }
 
-    char pt[384];
+    // pub_ip lets clients detect "same network as the device" even when ep is a DNS name.
+    char pub_ip[20] = "";
+    if (have_stun) {
+        strlcpy(pub_ip, stun_ep, sizeof(pub_ip));
+        char *colon = strrchr(pub_ip, ':');
+        if (colon) *colon = '\0';
+    }
+    char pt[400];
     snprintf(pt, sizeof(pt),
-             "{\"v\":%d,\"t\":\"ack\",\"ts\":%lld,\"n\":\"%s\",\"ep\":\"%s\",\"via\":\"%s\",\"lan\":\"%s\"}",
-             PROTO_VERSION, (long long)now, nonce->valuestring, my_ep, via, my_lan_ep);
+             "{\"v\":%d,\"t\":\"ack\",\"ts\":%lld,\"n\":\"%s\",\"ep\":\"%s\",\"via\":\"%s\",\"lan\":\"%s\",\"pub_ip\":\"%s\"}",
+             PROTO_VERSION, (long long)now, nonce->valuestring, my_ep, via, my_lan_ep, pub_ip);
     char content[640];
     if (p2p_envelope_seal(ps->key, (const uint8_t *)pt, strlen(pt), content, sizeof(content)) != 0) {
         return;
@@ -313,13 +329,14 @@ static void handle_message(const char *raw)
         kind->valueint != CONFIG_P2PTUN_NOSTR_KIND || !cJSON_IsString(content) || !has_p_tag(tags)) {
         goto out;
     }
-    if (seen_before(id->valuestring)) {
+    if (seen_before(content->valuestring)) {
         goto out;
     }
 
     // Authenticate: the envelope only opens with the key shared with an *enabled* peer.
     // (Nostr signatures are not needed for security; relays already verify them.)
     p2p_config_peers_snapshot(peers);
+    bool opened = false;
     for (int i = 0; i < P2P_MAX_PEERS; i++) {
         if (!peers[i].host || !peers[i].enabled ||
             (peers[i].expires && clock_valid() && time(NULL) >= (time_t)peers[i].expires)) {
@@ -331,6 +348,7 @@ static void handle_message(const char *raw)
         if (!ps || (n = p2p_envelope_open(ps->key, content->valuestring, pt, sizeof(pt) - 1)) < 0) {
             continue;
         }
+        opened = true;
         pt[n] = '\0';
         cJSON *msg = cJSON_Parse((const char *)pt);
         const cJSON *v = cJSON_GetObjectItem(msg, "v");
@@ -340,6 +358,19 @@ static void handle_message(const char *raw)
         }
         cJSON_Delete(msg);
         break;
+    }
+    if (!opened) {
+        // Not from a known peer: maybe a pairing request sealed with an invite secret.
+        char *reply = malloc(640);
+        if (reply && p2p_invite_handle(content->valuestring, reply, 640) && reply[0]) {
+            char *ev = malloc(1280);
+            if (ev && p2p_nostr_event(s_nsk, CONFIG_P2PTUN_NOSTR_KIND, (uint64_t)time(NULL), pubkey->valuestring,
+                                      reply, ev, 1280) > 0) {
+                publish(ev);
+            }
+            free(ev);
+        }
+        free(reply);
     }
 out:
     cJSON_Delete(root);

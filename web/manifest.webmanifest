@@ -1,0 +1,13 @@
+{
+  "name": "p2ptun connect",
+  "short_name": "p2ptun",
+  "description": "Pair with and connect to your ESP32 p2ptun device over WireGuard.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f1115",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

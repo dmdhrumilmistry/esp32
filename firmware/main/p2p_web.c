@@ -17,6 +17,7 @@
 #include "p2p_acl.h"
 #include "p2p_crypto.h"
 #include "p2p_events.h"
+#include "p2p_invites.h"
 #include "p2p_portmap.h"
 #include "p2p_signal.h"
 #include "p2p_tunnel.h"
@@ -26,6 +27,8 @@ static bool s_setup_mode;
 
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
+extern const char qr_js_start[] asm("_binary_qr_js_start");
+extern const char qr_js_end[] asm("_binary_qr_js_end");
 
 #define MAX_BODY 1024
 
@@ -39,7 +42,7 @@ static void security_headers(httpd_req_t *req)
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
     httpd_resp_set_hdr(req, "Referrer-Policy", "no-referrer");
     httpd_resp_set_hdr(req, "Content-Security-Policy",
-                       "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                       "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; "
                        "connect-src 'self'; img-src data:; form-action 'none'; frame-ancestors 'none'");
 }
 
@@ -334,6 +337,8 @@ static esp_err_t h_state(httpd_req_t *req)
     cJSON_AddNumberToObject(o, "max_peers", P2P_MAX_PEERS);
     cJSON_AddNumberToObject(o, "now", clock_valid() ? (double)time(NULL) : 0);
     cJSON_AddItemToObject(o, "events", p2p_events_json());
+    cJSON_AddItemToObject(o, "invites", p2p_invites_json());
+    cJSON_AddStringToObject(o, "web_client", p2p_config()->web_client);
     return send_json(req, "200 OK", o);
 }
 
@@ -440,16 +445,7 @@ static esp_err_t h_password(httpd_req_t *req)
 // ---------------------------------------------------------------------------
 // peers
 // ---------------------------------------------------------------------------
-static int find_peer(const uint8_t pub[32])
-{
-    p2p_config_t *c = p2p_config();
-    for (int i = 0; i < P2P_MAX_PEERS; i++) {
-        if (c->peers[i].host && memcmp(c->peers[i].pub, pub, 32) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
+static int find_peer(const uint8_t pub[32]) { return p2p_config_find_peer(pub); }
 
 static esp_err_t h_peer_add(httpd_req_t *req)
 {
@@ -472,44 +468,14 @@ static esp_err_t h_peer_add(httpd_req_t *req)
         return send_error(req, "400 Bad Request", err);
     }
 
-    p2p_config_t *c = p2p_config();
-    p2p_config_lock();
-    int slot = -1;
-    bool used_host[256] = {false};
-    for (int i = 0; i < P2P_MAX_PEERS; i++) {
-        if (c->peers[i].host) {
-            used_host[c->peers[i].host] = true;
-        } else if (slot < 0) {
-            slot = i;
-        }
-    }
-    if (find_peer(pub) >= 0) err = "peer already exists";
-    else if (slot < 0) err = "peer table full";
-    cJSON *resp = NULL;
-    if (!err) {
-        uint8_t host = 2;
-        while (used_host[host] && host < 254) host++;
-        p2p_peer_t *p = &c->peers[slot];
-        memset(p, 0, sizeof(*p));
-        strlcpy(p->name, name, sizeof(p->name));
-        memcpy(p->pub, pub, 32);
-        p->host = host;
-        p->enabled = 1;
-        p->expires = expires;
-        strlcpy(p->acl, acl, sizeof(p->acl));
-        if (p2p_config_save_peers() != ESP_OK) {
-            memset(p, 0, sizeof(*p));
-            err = "saving failed";
-        } else {
-            resp = cJSON_CreateObject();
-            cJSON_AddItemToObject(resp, "client", client_config(p));
-        }
-    }
-    p2p_config_unlock();
+    p2p_peer_t added;
+    err = p2p_config_add_peer(pname, pub, acl, expires, &added);
     cJSON_Delete(j);
     if (err) {
         return send_error(req, "409 Conflict", err);
     }
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddItemToObject(resp, "client", client_config(&added));
     p2p_event("peer '%s' authorized (%s%s)", pname, acl[0] ? "access: " : "full access",
               acl[0] ? acl : (expires ? ", expiring" : ""));
     p2p_tunnel_sync_peers();
@@ -603,6 +569,119 @@ static esp_err_t h_peer_update(httpd_req_t *req)
               now.acl[0] ? now.acl : "", now.expires ? ", expiring" : ", no expiry");
     p2p_tunnel_sync_peers(); // new rules apply to the live session immediately
     return send_ok(req);
+}
+
+// ---------------------------------------------------------------------------
+// invites (one-scan pairing)
+// ---------------------------------------------------------------------------
+static char *b64url_alloc(const char *in)
+{
+    size_t n = strlen(in), cap = (n + 2) / 3 * 4 + 1;
+    char *out = malloc(cap);
+    if (!out || !p2p_b64_encode((const uint8_t *)in, n, out, cap)) {
+        free(out);
+        return NULL;
+    }
+    char *w = out;
+    for (char *r = out; *r; r++) {
+        if (*r == '=') continue;
+        *w++ = *r == '+' ? '-' : *r == '/' ? '_' : *r;
+    }
+    *w = '\0';
+    return out;
+}
+
+static esp_err_t h_invite_create(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *j = read_json(req);
+    const char *name = j ? jstr(j, "name") : NULL;
+    char acl[P2P_ACL_TEXT_LEN] = "", pname[P2P_NAME_LEN] = "", secret[24];
+    uint32_t expires = 0;
+    bool has_acl, has_exp;
+    const char *err = !valid_name(name) ? "name: 1-23 chars of letters, digits, space, - _ ."
+                                        : parse_access(j, acl, &has_acl, &expires, &has_exp);
+    if (!err) strlcpy(pname, name, sizeof(pname));
+    cJSON_Delete(j);
+    if (err) {
+        return send_error(req, "400 Bad Request", err);
+    }
+    int id = p2p_invite_create(pname, acl, expires, secret);
+    if (!id) {
+        return send_error(req, "500 Internal Server Error", "could not create invite");
+    }
+    // Invite payload = device block + relays + secret; travels only in the URL #fragment.
+    p2p_peer_t tmp = {0};
+    strlcpy(tmp.name, pname, sizeof(tmp.name));
+    tmp.host = 1;
+    cJSON *inv = client_config(&tmp);
+    cJSON_DeleteItemFromObject(inv, "address"); // assigned when the invite is used
+    cJSON_AddNumberToObject(inv, "v", 1);
+    cJSON_AddStringToObject(inv, "secret", secret);
+    char *payload = cJSON_PrintUnformatted(inv);
+    cJSON_Delete(inv);
+    char *enc = payload ? b64url_alloc(payload) : NULL;
+    free(payload);
+    if (!enc) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    size_t link_len = strlen(p2p_config()->web_client) + strlen(enc) + 16;
+    char *link = malloc(link_len);
+    if (link) {
+        snprintf(link, link_len, "%s#p2ptun=%s", p2p_config()->web_client, enc);
+    }
+    free(enc);
+    if (!link) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(resp, "id", id);
+    cJSON_AddStringToObject(resp, "link", link);
+    cJSON_AddNumberToObject(resp, "expires_in_s", P2P_INVITE_TTL_S);
+    free(link);
+    p2p_event("invite #%d created for '%s' (valid %d min)", id, pname, P2P_INVITE_TTL_S / 60);
+    return send_json(req, "200 OK", resp);
+}
+
+static esp_err_t h_invite_revoke(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *j = read_json(req);
+    const cJSON *id = j ? cJSON_GetObjectItem(j, "id") : NULL;
+    bool ok = cJSON_IsNumber(id) && p2p_invite_revoke(id->valueint);
+    int idv = ok ? id->valueint : 0;
+    cJSON_Delete(j);
+    if (!ok) {
+        return send_error(req, "404 Not Found", "unknown invite");
+    }
+    p2p_event("invite #%d revoked", idv);
+    return send_ok(req);
+}
+
+static esp_err_t h_web_client(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *j = read_json(req);
+    const char *url = j ? jstr(j, "url") : NULL;
+    esp_err_t r;
+    if (!url || strlen(url) >= sizeof(p2p_config()->web_client) || strncmp(url, "https://", 8) != 0 ||
+        strlen(url) < 12 || strpbrk(url, "\"'<> #\\")) {
+        r = send_error(req, "400 Bad Request", "url must be an https:// address without spaces or #");
+    } else if (p2p_config_save_web_client(url) != ESP_OK) {
+        r = send_error(req, "500 Internal Server Error", "saving failed");
+    } else {
+        p2p_event("web client URL changed");
+        r = send_ok(req);
+    }
+    cJSON_Delete(j);
+    return r;
+}
+
+static esp_err_t h_qr_js(httpd_req_t *req)
+{
+    security_headers(req);
+    httpd_resp_set_type(req, "text/javascript; charset=utf-8");
+    return httpd_resp_send(req, qr_js_start, qr_js_end - qr_js_start - 1);
 }
 
 static esp_err_t h_peer_disable(httpd_req_t *req) { return peer_action(req, 0); }
@@ -705,7 +784,7 @@ esp_err_t p2p_web_start(bool setup_mode)
 {
     s_setup_mode = setup_mode;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 16;
+    cfg.max_uri_handlers = 24;
     cfg.stack_size = 8192;
     cfg.lru_purge_enable = true;
     cfg.max_open_sockets = 5;
@@ -730,6 +809,10 @@ esp_err_t p2p_web_start(bool setup_mode)
         {"/api/relays", HTTP_POST, h_relays},
         {"/api/endpoint", HTTP_POST, h_endpoint},
         {"/api/peers/update", HTTP_POST, h_peer_update},
+        {"/api/invites", HTTP_POST, h_invite_create},
+        {"/api/invites/revoke", HTTP_POST, h_invite_revoke},
+        {"/api/webclient", HTTP_POST, h_web_client},
+        {"/qr.js", HTTP_GET, h_qr_js},
         {"/api/reboot", HTTP_POST, h_reboot},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

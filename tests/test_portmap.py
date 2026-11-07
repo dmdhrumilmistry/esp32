@@ -125,6 +125,10 @@ class TestUpnp(unittest.TestCase):
                    "5\r\n<s:En\r\na\r\nvelope/>  \r\n0\r\n\r\n")
         self.assertEqual(cf("http", chunked)[1], "500\n<s:Envelope/>  ")
         self.assertNotEqual(cf("http", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffff\r\nabc")[0], 0)
+        # sizes that would wrap pointer arithmetic (32- and 64-bit) or are negative must be rejected
+        for size in ("ffffffff", "ffffffffffffffff", "-1", "+5", "fffffffffffffffffffff", ""):
+            rc, _ = cf("http", f"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{size}\r\nx\r\n0\r\n\r\n")
+            self.assertNotEqual(rc, 0, size)
 
     def test_private_ranges(self):
         for ip in ("10.1.2.3", "172.20.0.1", "192.168.0.1", "100.64.0.1", "100.127.255.255", "169.254.1.1", "127.0.0.1"):

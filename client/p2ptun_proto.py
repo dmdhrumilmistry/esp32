@@ -75,6 +75,44 @@ def envelope_open(key: bytes, content: str) -> bytes:
     return ChaCha20Poly1305(key).decrypt(raw[:12], raw[12:], ENVELOPE_AAD)
 
 # ---------------------------------------------------------------------------
+# Pairing (invites)
+# ---------------------------------------------------------------------------
+
+def pair_key(secret: bytes) -> bytes:
+    return hmac.new(secret, b"p2ptun-pair-v1", hashlib.sha256).digest()
+
+
+def _b64url_decode(s: str) -> bytes:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", s or ""):
+        raise ValueError("bad invite encoding")
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def parse_invite(text: str) -> dict:
+    """Invite link (...#p2ptun=...), the p2ptun= value, or the bare base64url blob."""
+    t = text.strip()
+    m = re.search(r"(?:#|^|[?&])p2ptun=([A-Za-z0-9_-]+)", t) or re.fullmatch(r"([A-Za-z0-9_-]{40,})", t)
+    if not m:
+        raise ValueError("not a p2ptun invite")
+    inv = json.loads(_b64url_decode(m.group(1)))
+    if inv.get("v") != 1:
+        raise ValueError("unsupported invite version")
+    secret = _b64url_decode(inv.get("secret", ""))
+    if len(secret) != 16:
+        raise ValueError("bad invite secret")
+    dev = inv.get("device", {})
+    unb64(dev.get("wg_pub", ""), 32)
+    if not re.fullmatch(r"[0-9a-f]{64}", dev.get("nostr_pub", "")):
+        raise ValueError("bad device nostr key")
+    relays = [u for u in inv.get("relays", []) if re.fullmatch(r"wss://[^\s\"'<>\\]+", u)]
+    if not relays:
+        raise ValueError("invite has no wss:// relays")
+    return {"name": str(inv.get("name", "")), "secret": secret,
+            "cfg": {"device": {"wg_pub": dev["wg_pub"], "nostr_pub": dev["nostr_pub"],
+                               "tunnel_ip": dev.get("tunnel_ip", ""), "routes": list(dev.get("routes", []))},
+                    "relays": relays}}
+
+# ---------------------------------------------------------------------------
 # BIP-340 Schnorr (pure Python; only used to sign small signaling events)
 # ---------------------------------------------------------------------------
 _P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F

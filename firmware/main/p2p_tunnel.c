@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -310,7 +311,18 @@ esp_err_t p2p_tunnel_start(void)
 typedef struct {
     const p2p_peer_t *peers;
     p2p_acl_env_t env;
+    time_t now;
 } sync_ctx_t;
+
+// A peer may be in WireGuard only if enabled and, for time-limited access, the clock is synced
+// and the expiry hasn't passed. Fails closed: an unsynced clock never loads a time-limited peer.
+static bool peer_active(const p2p_peer_t *p, time_t now)
+{
+    if (!p->host || !p->enabled) {
+        return false;
+    }
+    return !p->expires || (now > 1700000000 && now < (time_t)p->expires);
+}
 
 static esp_err_t do_sync(void *arg)
 {
@@ -325,7 +337,7 @@ static esp_err_t do_sync(void *arg)
         }
         bool keep = false;
         for (int j = 0; j < P2P_MAX_PEERS; j++) {
-            if (peers[j].host && peers[j].enabled && memcmp(peers[j].pub, s_loaded[i].pub, 32) == 0) {
+            if (peer_active(&peers[j], ctx->now) && memcmp(peers[j].pub, s_loaded[i].pub, 32) == 0) {
                 keep = true;
                 compile_acl(&s_loaded[i], &peers[j]); // rule changes apply immediately
                 break;
@@ -340,7 +352,7 @@ static esp_err_t do_sync(void *arg)
     }
     // 2. add newly enabled peers
     for (int j = 0; j < P2P_MAX_PEERS; j++) {
-        if (!peers[j].host || !peers[j].enabled) {
+        if (!peer_active(&peers[j], ctx->now)) {
             continue;
         }
         bool have = false;
@@ -389,6 +401,7 @@ static p2p_acl_env_t current_env(void)
     if (sta_ip(&info)) {
         env.lan_mask = ntohl(info.netmask.addr);
         env.lan_net = ntohl(info.ip.addr) & env.lan_mask;
+        env.dev_lan_ip = ntohl(info.ip.addr);
     }
     return env;
 }
@@ -405,7 +418,7 @@ void p2p_tunnel_sync_peers(void)
     }
     xSemaphoreTake(sync_lock, portMAX_DELAY);
     p2p_config_peers_snapshot(snap);
-    sync_ctx_t ctx = {.peers = snap, .env = current_env()};
+    sync_ctx_t ctx = {.peers = snap, .env = current_env(), .now = time(NULL)};
     esp_netif_tcpip_exec(do_sync, &ctx);
     xSemaphoreGive(sync_lock);
 }

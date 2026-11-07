@@ -85,6 +85,10 @@ esp_err_t p2p_config_load(void)
     get_str(h, "wifi_pass", s_cfg.wifi_pass, sizeof(s_cfg.wifi_pass));
     get_str(h, "relays", s_cfg.relays, sizeof(s_cfg.relays));
     get_str(h, "ep_override", s_cfg.ep_override, sizeof(s_cfg.ep_override));
+    get_str(h, "webclient", s_cfg.web_client, sizeof(s_cfg.web_client));
+    if (s_cfg.web_client[0] == '\0') {
+        strlcpy(s_cfg.web_client, CONFIG_P2PTUN_WEB_CLIENT_URL, sizeof(s_cfg.web_client));
+    }
     if (s_cfg.relays[0] == '\0') {
         strlcpy(s_cfg.relays, CONFIG_P2PTUN_RELAYS, sizeof(s_cfg.relays));
     }
@@ -151,8 +155,22 @@ esp_err_t p2p_config_save_relays(const char *relays)
 
 esp_err_t p2p_config_save_ep_override(const char *ep)
 {
+    char copy[sizeof(s_cfg.ep_override)];
+    p2p_config_lock(); // read by the signal task (p2p_reach_endpoint)
     strlcpy(s_cfg.ep_override, ep, sizeof(s_cfg.ep_override));
-    return commit("ep_override", NULL, 0, s_cfg.ep_override);
+    strlcpy(copy, s_cfg.ep_override, sizeof(copy));
+    p2p_config_unlock();
+    return commit("ep_override", NULL, 0, copy);
+}
+
+esp_err_t p2p_config_save_web_client(const char *url)
+{
+    char copy[sizeof(s_cfg.web_client)];
+    p2p_config_lock();
+    strlcpy(s_cfg.web_client, url, sizeof(s_cfg.web_client));
+    strlcpy(copy, s_cfg.web_client, sizeof(copy));
+    p2p_config_unlock();
+    return commit("webclient", NULL, 0, copy);
 }
 
 esp_err_t p2p_config_save_peers(void)
@@ -172,6 +190,56 @@ esp_err_t p2p_config_factory_reset(void)
         err = nvs_commit(h);
     }
     nvs_close(h);
+    return err;
+}
+
+int p2p_config_find_peer(const uint8_t pub[32])
+{
+    for (int i = 0; i < P2P_MAX_PEERS; i++) {
+        if (s_cfg.peers[i].host && memcmp(s_cfg.peers[i].pub, pub, 32) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const char *p2p_config_add_peer(const char *name, const uint8_t pub[32], const char *acl, uint32_t expires,
+                                p2p_peer_t *out)
+{
+    const char *err = NULL;
+    p2p_config_lock();
+    int slot = -1;
+    bool used_host[256] = {false};
+    for (int i = 0; i < P2P_MAX_PEERS; i++) {
+        if (s_cfg.peers[i].host) {
+            used_host[s_cfg.peers[i].host] = true;
+        } else if (slot < 0) {
+            slot = i;
+        }
+    }
+    if (p2p_config_find_peer(pub) >= 0) {
+        err = "this key is already a peer";
+    } else if (slot < 0) {
+        err = "peer table full";
+    } else {
+        uint8_t host = 2;
+        while (used_host[host] && host < 254) host++;
+        p2p_peer_t *p = &s_cfg.peers[slot];
+        memset(p, 0, sizeof(*p));
+        strlcpy(p->name, name, sizeof(p->name));
+        memcpy(p->pub, pub, 32);
+        p->host = host;
+        p->enabled = 1;
+        p->expires = expires;
+        strlcpy(p->acl, acl ? acl : "", sizeof(p->acl));
+        if (p2p_config_save_peers() != ESP_OK) {
+            memset(p, 0, sizeof(*p));
+            err = "saving failed";
+        } else if (out) {
+            *out = *p;
+        }
+    }
+    p2p_config_unlock();
     return err;
 }
 

@@ -8,6 +8,8 @@
 //           | a.b.c.d[/prefix]
 // Examples: "lan" · "tcp:192.168.1.20:22" · "192.168.1.0/24:80-443, udp:192.168.1.1:53"
 // A port without a protocol matches TCP and UDP. Anything not matched is dropped.
+// Packets to the device itself (its tunnel IP or its LAN IP, i.e. the admin web UI) match only
+// "device" rules: "lan" or a CIDR covering the device's LAN address never grant access to it.
 #pragma once
 
 #include <stdbool.h>
@@ -41,7 +43,8 @@ typedef struct {
 typedef struct {
     uint32_t lan_net;   // host byte order; lan_mask 0 = unknown (then "lan" matches nothing)
     uint32_t lan_mask;
-    uint32_t dev_ip;
+    uint32_t dev_ip;      // the device's tunnel address
+    uint32_t dev_lan_ip;  // the device's own LAN address (0 = unknown)
 } p2p_acl_env_t;
 
 // Parse rules. On failure returns false and writes a human-readable reason to err.

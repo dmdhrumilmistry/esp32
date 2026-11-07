@@ -168,5 +168,60 @@
   $("dl").onclick = () => download("p2ptun.conf", $("r-conf").value);
   $("copy-conf").onclick = () => copy($("r-conf").value, $("copy-conf"));
 
+  // ---- one-scan pairing: the invite arrives in the URL #fragment (never sent to the server)
+  let invite = null;
+  function readInvite() {
+    if (!/p2ptun=/.test(location.hash)) return;
+    const raw = location.hash;
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (e) { location.hash = ""; }
+    try {
+      invite = P2P.parseInvite(raw);
+    } catch (e) {
+      show("pair-card", true);
+      $("pair-go").disabled = true;
+      msg("m-pair", "This invite link is damaged: " + e.message);
+      return;
+    }
+    $("pair-dev").textContent = invite.cfg.device.tunnel_ip + " (" + (invite.cfg.device.routes.join(", ") || "device only") + ")";
+    $("pair-name").textContent = invite.name || "a new peer";
+    show("pair-newkey", !state.pub); show("pair-oldkey", !!state.pub); show("pair-unlock", !!state.locked);
+    show("pair-card", true);
+    $("pair-card").scrollIntoView({ block: "start" });
+  }
+  $("pair-cancel").onclick = () => { invite = null; show("pair-card", false); };
+  $("pair-go").onclick = async () => {
+    if (!invite) return;
+    const log = (line) => { $("pair-log").textContent += line + "\n"; };
+    $("pair-log").textContent = ""; msg("m-pair", "");
+    $("pair-go").disabled = true;
+    try {
+      if (!state.pub) {
+        const pass = $("pair-pass").value;
+        if (pass && pass.length < 8) throw new Error("Use at least 8 characters for the passphrase, or leave it empty");
+        await storeKey(P2P.wgGenKey(), pass);
+        log("created a new key");
+      }
+      let priv;
+      if (state.priv) priv = P2P.unb64(state.priv, 32);
+      else {
+        const pass = $("pair-unlock-pass").value || $("pair-pass").value;
+        if (!pass) throw new Error("enter your passphrase");
+        priv = await P2P.unlockKey(state.locked, pass);
+      }
+      log("asking the device to add this key (encrypted)…");
+      const cfg = await P2P.pair(invite, priv, { log });
+      state.config = cfg; save(state);
+      invite = null;
+      clearResult(); render();
+      msg("m-pair", `Paired as ${cfg.name} (${cfg.address}). Now press “Get WireGuard config” below.`, true);
+      $("go").scrollIntoView({ behavior: "smooth", block: "center" });
+    } catch (e) {
+      msg("m-pair", e.message);
+      $("pair-go").disabled = false;
+    }
+  };
+  window.addEventListener("hashchange", readInvite);
+
   render();
+  readInvite();
 })();

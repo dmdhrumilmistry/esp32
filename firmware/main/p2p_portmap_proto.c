@@ -301,29 +301,33 @@ char *p2p_http_body(char *resp, size_t len)
     if (!chunked) {
         return body;
     }
-    // de-chunk in place
+    // de-chunk in place; every size is checked against the bytes actually left (no pointer
+    // arithmetic on untrusted values, which could wrap on 32-bit targets)
     char *src = body, *dst = body, *end = resp + len;
     for (;;) {
+        if (src >= end || !isxdigit((unsigned char)*src)) {
+            return NULL; // also rejects "-1" / "+5", which strtoul would accept
+        }
         char *e;
         unsigned long n = strtoul(src, &e, 16);
-        if (e == src) {
-            return NULL;
+        if (e - src > 8) {
+            return NULL; // absurdly long size field
         }
         char *line_end = strstr(e, "\r\n");
-        if (!line_end) {
+        if (!line_end || line_end >= end) {
             return NULL;
         }
         src = line_end + 2;
         if (n == 0) {
             break;
         }
-        if (src + n > end) {
+        if (n > (size_t)(end - src)) {
             return NULL;
         }
         memmove(dst, src, n);
         dst += n;
         src += n;
-        if (src + 2 <= end && src[0] == '\r' && src[1] == '\n') {
+        if ((size_t)(end - src) >= 2 && src[0] == '\r' && src[1] == '\n') {
             src += 2;
         }
     }

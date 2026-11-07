@@ -170,10 +170,20 @@ static int http_request(const char *url, const char *soap_action, const char *bo
     return *body ? p2p_http_status(out) : -1;
 }
 
+// Only talk HTTP to the default gateway itself: SSDP answers can be spoofed by other LAN hosts.
+static bool url_is_gateway(const char *url, uint32_t gw)
+{
+    char host[64], path[256];
+    uint16_t port;
+    struct in_addr a;
+    return p2p_url_split(url, host, sizeof(host), &port, path, sizeof(path)) &&
+           inet_pton(AF_INET, host, &a) == 1 && a.s_addr == gw;
+}
+
 static bool try_upnp(const esp_netif_ip_info_t *info, uint8_t ext_ip[4], uint16_t *ext_port, uint32_t *life)
 {
     char location[256], control[320], service[128], cu[256], action[192], client[16];
-    if (!ssdp_discover(info->gw.addr, location, sizeof(location))) {
+    if (!ssdp_discover(info->gw.addr, location, sizeof(location)) || !url_is_gateway(location, info->gw.addr)) {
         return false;
     }
     char *http = malloc(HTTP_MAX), *soap = malloc(1024), *body;
@@ -182,7 +192,7 @@ static bool try_upnp(const esp_netif_ip_info_t *info, uint8_t ext_ip[4], uint16_
 
     if (http_request(location, NULL, NULL, http, HTTP_MAX, &body) != 200 ||
         !p2p_igd_find_control(body, service, sizeof(service), cu, sizeof(cu)) ||
-        !p2p_url_resolve(location, cu, control, sizeof(control))) {
+        !p2p_url_resolve(location, cu, control, sizeof(control)) || !url_is_gateway(control, info->gw.addr)) {
         ESP_LOGW(TAG, "UPnP: no usable WAN connection service at %s", location);
         goto out;
     }
@@ -230,22 +240,34 @@ static void portmap_task(void *arg)
 {
     for (;;) {
         esp_netif_ip_info_t info;
-        uint8_t ip[4];
+        uint8_t ip[4] = {0};
         uint16_t port = 0;
         uint32_t life = 0;
         uint32_t next_s = 600;
+        pm_method_t m = PM_NONE;
         if (!sta_info(&info)) {
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
         if (try_natpmp(&info, ip, &port, &life)) {
-            set_result(PM_NATPMP, ip, port, "router mapping via NAT-PMP");
-        } else if (try_upnp(&info, ip, &port, &life)) {
-            set_result(PM_UPNP, ip, port, "router mapping via UPnP");
+            m = PM_NATPMP;
+        } else {
+            // a partial NAT-PMP answer must not leak into the UPnP attempt
+            memset(ip, 0, sizeof(ip));
+            port = 0;
+            life = 0;
+            if (try_upnp(&info, ip, &port, &life)) {
+                m = PM_UPNP;
+            }
+        }
+        if (m == PM_NATPMP) {
+            set_result(m, ip, port, "router mapping via NAT-PMP");
+        } else if (m == PM_UPNP) {
+            set_result(m, ip, port, "router mapping via UPnP");
         } else {
             set_result(PM_NONE, NULL, 0, "router has no UPnP/NAT-PMP (or it is disabled)");
         }
-        if (port) {
+        if (m != PM_NONE) {
             ESP_LOGI(TAG, "mapped UDP %u.%u.%u.%u:%u -> :%d (lease %lus)", ip[0], ip[1], ip[2], ip[3], port,
                      CONFIG_P2PTUN_WG_PORT, (unsigned long)life);
             next_s = life / 2 < 1800 ? life / 2 : 1800;
@@ -277,7 +299,12 @@ static bool mapping_usable(char *why, size_t why_len)
         snprintf(why, why_len, "router's WAN address is private (double NAT / CGNAT)");
         return false;
     }
-    if (p2p_tunnel_public_ip(stun_ip) && memcmp(stun_ip, s_ext_ip, 4) != 0) {
+    // Fail closed: advertise the mapping only when STUN positively confirms the router's address.
+    if (!p2p_tunnel_public_ip(stun_ip)) {
+        snprintf(why, why_len, "public address not confirmed by STUN yet");
+        return false;
+    }
+    if (memcmp(stun_ip, s_ext_ip, 4) != 0) {
         snprintf(why, why_len, "router's WAN address differs from STUN (double NAT)");
         return false;
     }
@@ -286,9 +313,12 @@ static bool mapping_usable(char *why, size_t why_len)
 
 bool p2p_reach_endpoint(char *out, size_t len, const char **via)
 {
-    p2p_config_t *cfg = p2p_config();
-    if (cfg->ep_override[0]) {
-        strlcpy(out, cfg->ep_override, len);
+    char manual[sizeof(p2p_config()->ep_override)];
+    p2p_config_lock(); // the web UI may be rewriting it
+    strlcpy(manual, p2p_config()->ep_override, sizeof(manual));
+    p2p_config_unlock();
+    if (manual[0]) {
+        strlcpy(out, manual, len);
         *via = "manual";
         return true;
     }
@@ -313,8 +343,12 @@ bool p2p_reach_endpoint(char *out, size_t len, const char **via)
 
 void p2p_portmap_status(char *out, size_t len)
 {
-    if (p2p_config()->ep_override[0]) {
-        snprintf(out, len, "manual endpoint %s (make sure UDP is forwarded to this device)", p2p_config()->ep_override);
+    char manual[sizeof(p2p_config()->ep_override)];
+    p2p_config_lock();
+    strlcpy(manual, p2p_config()->ep_override, sizeof(manual));
+    p2p_config_unlock();
+    if (manual[0]) {
+        snprintf(out, len, "manual endpoint %s (make sure UDP is forwarded to this device)", manual);
         return;
     }
     if (!s_lock) {

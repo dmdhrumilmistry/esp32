@@ -20,8 +20,11 @@ def ipv4(dst, proto=6, dport=22, src="10.77.0.2", frag_off=0, ihl=5, l4=True):
     return hdr + opts + payload
 
 
+DEV_LAN = "192.168.1.50"
+
+
 def check(rules, pkt, lan=LAN):
-    r = subprocess.run([str(HOST), "acl-check", rules, lan, DEV, pkt.hex()], capture_output=True, text=True)
+    r = subprocess.run([str(HOST), "acl-check", rules, lan, DEV, pkt.hex(), DEV_LAN], capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else f"rc{r.returncode}:{r.stdout.strip()}"
 
 
@@ -62,6 +65,15 @@ class TestAclMatch(unittest.TestCase):
         self.assertEqual(check("lan", ipv4(DEV, 6, 80)), "deny")          # web UI not included in "lan"
         self.assertEqual(check("device", ipv4(DEV, 6, 80)), "allow")
         self.assertEqual(check("lan", ipv4("192.168.1.20"), lan="-"), "deny")  # LAN unknown -> nothing
+
+    def test_device_lan_ip_needs_device_rule(self):
+        # the admin UI is also reachable on the device's own LAN IP: "lan"/CIDR rules must not grant it
+        for rules in ("lan", "192.168.1.0/24", "tcp:192.168.1.50:80", "0.0.0.0/0"):
+            self.assertEqual(check(rules, ipv4(DEV_LAN, 6, 80)), "deny", rules)
+            self.assertEqual(check(rules, ipv4(DEV, 6, 80)), "deny", rules)
+        self.assertEqual(check("device", ipv4(DEV_LAN, 6, 80)), "allow")
+        self.assertEqual(check("tcp:device:80", ipv4(DEV_LAN, 6, 80)), "allow")
+        self.assertEqual(check("any", ipv4(DEV_LAN, 6, 80)), "allow")
 
     def test_protocol_and_ports(self):
         r = "tcp:192.168.1.20:22, udp:192.168.1.1:53, 192.168.1.30:8000-8100, icmp:192.168.1.0/24"

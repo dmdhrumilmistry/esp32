@@ -176,22 +176,21 @@ bool p2p_acl_allows(const p2p_acl_t *acl, const p2p_acl_env_t *env, const uint8_
         have_port = true;
     }
 
+    bool to_device = dst == env->dev_ip || (env->dev_lan_ip && dst == env->dev_lan_ip);
     for (uint8_t i = 0; i < acl->n; i++) {
         const p2p_acl_rule_t *r = &acl->rules[i];
         if (r->proto && r->proto != proto) {
             continue;
         }
         bool addr_ok;
-        switch (r->kind) {
-        case P2P_ACL_KIND_LAN:
+        if (r->kind == P2P_ACL_KIND_DEVICE) {
+            addr_ok = to_device;
+        } else if (to_device) {
+            addr_ok = false; // the device (admin UI) is reachable only via an explicit "device" rule
+        } else if (r->kind == P2P_ACL_KIND_LAN) {
             addr_ok = env->lan_mask != 0 && (dst & env->lan_mask) == (env->lan_net & env->lan_mask);
-            break;
-        case P2P_ACL_KIND_DEVICE:
-            addr_ok = dst == env->dev_ip;
-            break;
-        default:
+        } else {
             addr_ok = (dst & r->mask) == r->net;
-            break;
         }
         if (!addr_ok) {
             continue;

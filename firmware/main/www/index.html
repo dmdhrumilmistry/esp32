@@ -105,7 +105,34 @@ td.v{word-break:normal;white-space:nowrap}
   </div>
 
   <div class="card">
-    <h2>Authorize a client</h2>
+    <h2>Invite a device <span class="pill">easiest</span></h2>
+    <p class="k" style="text-transform:none">Creates a one-time QR code / link (valid 15 minutes). Scan it with the phone or open it on the computer, tap <b>Pair</b>, and it's set up automatically: no keys to copy.</p>
+    <form id="f-inv">
+      <div class="grid">
+        <div><label>Name</label><input name="name" required maxlength="23" pattern="[A-Za-z0-9 _.\-]+" placeholder="phone"></div>
+        <div><label>Allowed destinations (empty = full access)</label><input name="acl" maxlength="95" placeholder="e.g. lan" autocomplete="off"></div>
+        <div><label>Access expires</label><select name="expires_in"><option value="0">never</option><option value="3600">in 1 hour</option><option value="28800">in 8 hours</option><option value="86400">in 24 hours</option><option value="604800">in 7 days</option><option value="2592000">in 30 days</option></select></div>
+      </div>
+      <div class="row" style="margin-top:14px"><button class="primary">Create invite</button></div>
+      <div class="msg" id="m-inv"></div>
+    </form>
+    <div id="inv-box" class="hide" style="margin-top:12px">
+      <div class="row" style="align-items:flex-start;gap:16px">
+        <div id="inv-qr" style="width:240px;max-width:100%;background:#fff;border-radius:8px;padding:4px"></div>
+        <div style="flex:1;min-width:220px">
+          <div><b id="inv-name"></b>: <span id="inv-status" class="pill"></span></div>
+          <p class="k" style="text-transform:none">Scan with the phone camera (or open the link). The link contains a one-time secret: only share it with the device you're adding.</p>
+          <pre id="inv-link" style="max-height:90px"></pre>
+          <div class="row"><button id="inv-copy">Copy link</button><button id="inv-revoke" class="danger">Revoke</button><button id="inv-close">Close</button></div>
+        </div>
+      </div>
+    </div>
+    <div id="inv-list" style="margin-top:8px"></div>
+    <p class="k" style="text-transform:none;margin-top:8px">Invite links open the browser client at <span id="inv-wc" class="mono-k"></span> (change it in Settings).</p>
+  </div>
+
+  <div class="card">
+    <h2>Authorize a client by public key</h2>
     <p class="k" style="text-transform:none">Get the client's public key from the <b>p2ptun web client</b> (any OS: Windows, macOS, Linux, Android, iOS) or from <code>python3 p2ptun.py genkey</code> (desktop), and paste it here.</p>
     <form id="f-add">
       <div class="grid">
@@ -148,6 +175,11 @@ td.v{word-break:normal;white-space:nowrap}
         <div class="msg" id="m-ep"></div>
         <p class="k" style="text-transform:none">Only needed if you forward UDP manually on your router (or use DDNS). Applies immediately.</p>
       </form>
+      <form id="f-wc">
+        <label>Browser client URL (for invite links)</label><input name="url" maxlength="127" placeholder="https://you.github.io/esp32/">
+        <div class="row" style="margin-top:12px"><button>Save URL</button></div>
+        <div class="msg" id="m-wc"></div>
+      </form>
       <form id="f-relays">
         <label>Nostr relays (1–3, comma separated wss:// URLs)</label><input name="relays" required>
         <div class="row" style="margin-top:12px"><button>Save relays</button><button type="button" id="reboot" class="danger">Reboot</button></div>
@@ -158,6 +190,7 @@ td.v{word-break:normal;white-space:nowrap}
 </section>
 </main>
 
+<script src="/qr.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -196,6 +229,38 @@ function renderEvents() {
   const evs = state.events || [];
   if (!evs.length) { box.append(el("p", "No events yet.", "k")); return; }
   for (const e of evs) { const r = el("div", undefined, "ev"); r.append(el("span", when(e), "k"), el("span", e.m)); box.append(r); }
+}
+let currentInvite = null;
+function renderInvites() {
+  const wc = $("f-wc").url;
+  if (document.activeElement !== wc) wc.value = state.web_client || "";
+  $("inv-wc").textContent = state.web_client || "";
+  const list = $("inv-list"); list.textContent = "";
+  for (const i of (state.invites || [])) {
+    const label = {pending: `waiting… ${Math.ceil(i.expires_in_s / 60)} min left`, used: "paired ✔ " + i.peer, expired: "expired", revoked: "revoked"}[i.state] || i.state;
+    if (currentInvite && currentInvite.id === i.id) {
+      $("inv-status").textContent = label;
+      $("inv-status").className = "pill" + (i.state === "used" ? " ok" : "");
+      $("inv-revoke").classList.toggle("hide", i.state !== "pending");
+      if (i.state !== "pending") $("inv-qr").style.opacity = "0.15";
+    }
+    const r = el("div", undefined, "ev"); r.append(el("span", "invite #" + i.id, "k"), el("span", `${i.name}: ${label}`)); list.append(r);
+  }
+}
+function showInvite(name, res) {
+  currentInvite = res;
+  $("inv-name").textContent = name;
+  $("inv-link").textContent = res.link;
+  const box = $("inv-qr"); box.textContent = ""; box.style.opacity = "1";
+  try {
+    const svg = P2PQR.toSvg(P2PQR.encode(res.link, {ecc: "L"}), document, {scale: 4, margin: 4});
+    svg.setAttribute("width", "100%"); svg.removeAttribute("height");
+    box.append(svg);
+  } catch (e) { box.append(el("p", "QR unavailable: use the link", "k")); }
+  $("inv-status").textContent = "waiting…"; $("inv-status").className = "pill";
+  $("inv-revoke").classList.remove("hide");
+  $("inv-box").classList.remove("hide");
+  $("inv-box").scrollIntoView({behavior: "smooth", block: "center"});
 }
 function editPeer(p) {
   const f = $("f-edit");
@@ -263,6 +328,7 @@ function render() {
     tb.append(tr);
   }
   renderEvents();
+  renderInvites();
 }
 
 async function act(what, p, confirmText) {
@@ -314,6 +380,18 @@ form("f-edit", async (v, f) => {
   try { await api("/api/peers/update", body); f.classList.add("hide"); refresh(); } catch (e) { msg("m-edit", e.message); }
 });
 $("edit-cancel").onclick = () => $("f-edit").classList.add("hide");
+form("f-inv", async (v, f) => {
+  try {
+    const r = await api("/api/invites", {name: v.name.trim(), acl: v.acl.trim(), expires_in: Number(v.expires_in)});
+    showInvite(v.name.trim(), r); f.reset(); msg("m-inv", ""); refresh();
+  } catch (e) { msg("m-inv", e.message); }
+});
+$("inv-revoke").onclick = async () => { if (!currentInvite) return; try { await api("/api/invites/revoke", {id: currentInvite.id}); refresh(); } catch (e) { alert(e.message); } };
+$("inv-close").onclick = () => { $("inv-box").classList.add("hide"); currentInvite = null; };
+copyBtn("inv-copy", "inv-link", "Copy link");
+form("f-wc", async (v) => {
+  try { await api("/api/webclient", {url: v.url.trim()}); msg("m-wc", "Saved.", true); refresh(); } catch (e) { msg("m-wc", e.message); }
+});
 form("f-ep", async (v) => {
   try { await api("/api/endpoint", {endpoint: v.endpoint.trim()}); msg("m-ep", "Saved.", true); refresh(); } catch (e) { msg("m-ep", e.message); }
 });

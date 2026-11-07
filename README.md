@@ -23,6 +23,10 @@ controls who may connect, and can cut off any active connection instantly.
 * **Reachable from phones too:** the device asks your router to forward its WireGuard port
   (NAT-PMP / UPnP-IGD, verified against STUN), or you set a manual endpoint. The stock WireGuard
   app on any OS can then dial it directly, even from carrier networks where hole punching fails.
+* **One-scan pairing:** in the device UI press **Invite a device**, scan the QR code with the
+  phone (or open the link on a computer) and tap **Pair**. The key is created on that device and
+  authorized automatically with the access rules and expiry you chose. Invites are single-use,
+  valid for 15 minutes, and travel only in the URL `#fragment` (never sent to the web server).
 * **Web UI** (served by the ESP32): authorize a client by pasting its public key, see who is
   connected (endpoint, last seen), **Block** (cuts the live session and refuses reconnects) or
   **Delete** a peer, and change the admin password, relays and endpoint override.
@@ -34,8 +38,9 @@ controls who may connect, and can cut off any active connection instantly.
   blocks the peer, cuts its session and ignores its knocks.
 * **Security event log:** admin logins (with source IP), failed logins and lockouts, accepted or
   rejected knocks, peer changes and expiries, all shown in the UI.
-* **Browser client** (`web/`, static page, no install): creates the key on the phone or computer,
-  does the encrypted knock from the browser and gives you a ready `p2ptun.conf` for the WireGuard app.
+* **Browser client** (`web/`, static page, no install, can be added to the home screen): creates the
+  key on the phone or computer, pairs from an invite, does the encrypted knock from the browser and
+  gives you a ready `p2ptun.conf` (download or QR code) for the WireGuard app.
 
 ## Supported clients
 
@@ -58,8 +63,10 @@ The reachability panel in the device UI tells you which case you're in.
 | Authorized client reaches too much | Per-peer allowlist (protocol, address/CIDR, port range) checked on every decrypted packet before it enters the IP stack. The default is deny once any rule is set. Peer-to-peer forwarding is never allowed. |
 | Client spoofs another source address | The cryptokey routing check verifies each packet's **source** against the peer's tunnel address. Upstream checked the destination, which is fixed in the vendored copy (see `PATCHES.md`). |
 | Web UI attacks | PBKDF2-SHA256 password hash, 5-try lockout, random 256-bit `HttpOnly; SameSite=Strict` session cookie, JSON-only POST (CSRF), strict CSP, `X-Frame-Options: DENY`, no external resources, all output via `textContent`. |
-| Router port mapping exposes the device | Only the WireGuard UDP port is mapped. WireGuard silently drops anything not authenticated by an authorized key, and the web UI is never mapped. The router's external IP is cross-checked with STUN, so a fake SSDP/NAT-PMP answer can't redirect clients. Turn it off with `CONFIG_P2PTUN_PORTMAP`. |
-| Browser client key theft | The key is created and kept in the browser (optional passphrase: PBKDF2-SHA256 310k + AES-GCM). The page loads no third-party code, and its CSP allows only `wss:` connections. Host it on its **own origin**: every `<user>.github.io/*` Pages site shares one origin, and so one `localStorage`. |
+| Router port mapping exposes the device | Only the WireGuard UDP port is mapped. WireGuard silently drops anything not authenticated by an authorized key, and the web UI is never mapped. UPnP/NAT-PMP is spoken only with the default gateway, and a mapping is advertised only when its external IP matches what STUN sees. A fake answer can at worst give a wrong port, so clients fail to connect but are never redirected to another host. WireGuard authentication still applies either way. Turn it off with `CONFIG_P2PTUN_PORTMAP`. |
+| Browser client key theft | The key is created and kept in the browser (optional passphrase: PBKDF2-SHA256 310k + AES-GCM). The page loads no third-party code, and its CSP allows only `wss:` connections (relays). It also makes a WebRTC STUN request to Google/Cloudflare to learn the network's public IP, so those servers see that IP. Host it on its **own origin**: every `<user>.github.io/*` Pages site shares one origin, and so one `localStorage`. |
+| Invite link leaks | An invite is single-use, valid 15 minutes, RAM-only and created only by a logged-in admin. Its secret travels in the URL `#fragment`, which browsers never send to the web server, and the client strips it from the address bar. Every pairing is logged, and the admin can revoke a pending invite or block the resulting peer. |
+| Event log flooded by replays | Knocks are de-duplicated on their encrypted content, rejected knocks are coalesced per peer per minute, and knock traffic has its own ring, so it can't evict login or admin events. |
 | Unconfigured device hijacked | The setup AP is WPA2 with a random password that is shown only on the serial console. |
 | Weak keys at first boot | Keys are generated with the bootloader entropy source enabled (the ESP32 RNG is only a true RNG while RF or that source is on). |
 | Device stolen | Enable **Secure Boot v2 + Flash Encryption + NVS encryption** for production (lines in `firmware/sdkconfig.defaults`). Hold BOOT for 5 s while it runs to wipe all keys and settings. |
@@ -104,25 +111,28 @@ W wifi:   Open:     http://192.168.4.1/
 Join that Wi-Fi, open the page, enter your Wi-Fi credentials and an admin password. The device
 reboots onto your network. Open `http://<device-ip>/` and log in.
 
-### 3. Connect a phone or any computer (browser client)
+### 3. Connect a phone or any computer (one scan)
 
-Open the browser client: publish `web/` with GitHub Pages (the `web-client` workflow; enable
-*Settings → Pages → Source: GitHub Actions*) or serve it from any static host. Then:
+The browser client must be hosted somewhere. Enable GitHub Pages for this repo (*Settings → Pages →
+Source: GitHub Actions*; the `web-client` workflow publishes `web/`), or host `web/` anywhere and set
+its URL in the device UI under *Settings → Browser client URL*.
 
-1. **Your key → Create key.** Copy the public key.
-2. In the **device** web UI, go to **Authorize a client**, enter a name and the key, and press **Authorize**.
-   Copy the JSON it shows.
-3. Back in the browser client, paste it into **Device config** and press **Save**.
-4. Press **Get WireGuard config**, then **Download p2ptun.conf** and import it in the WireGuard app
-   (step-by-step instructions for each OS are on the page). You can then reach the device at
-   `10.77.0.1` and the whole LAN behind it.
+1. In the **device** web UI: **Invite a device** → name it (optionally restrict access / set an
+   expiry) → **Create invite**. A QR code appears.
+2. On the phone, scan it with the camera (on a computer, open the link) and tap **Pair**.
+3. Tap **Get WireGuard config**, then **Download p2ptun.conf** and import it in the WireGuard app
+   (instructions for each OS are on the page). From a laptop you can instead scan the shown QR code
+   with the phone's WireGuard app. You can then reach `10.77.0.1` and the LAN behind it.
+
+Prefer copy/paste? The device UI also has **Authorize a client by public key**: paste the key the
+browser client (or `p2ptun.py genkey`) shows, and paste the JSON the device returns back into the client.
 
 ### 4. Desktop alternative: Python client
 
 ```bash
 cd client && pip install -r requirements.txt
-python3 p2ptun.py genkey            # prints this client's public key: authorize it in the device UI
-python3 p2ptun.py join '{"name":"laptop","address":"10.77.0.2/32","device":{...},"relays":[...]}'
+python3 p2ptun.py pair 'https://…/esp32/#p2ptun=…'   # easiest: an invite link from the device UI
+# or: python3 p2ptun.py genkey  → authorize the key in the device UI → python3 p2ptun.py join '<json>'
 
 sudo python3 p2ptun.py up           # Linux: knock + hole punch + interface, stays connected
 # [p2ptun] my public endpoint 203.0.113.9:40001 (LAN 10.0.0.5:51821)
@@ -146,7 +156,8 @@ firmware/                      ESP-IDF project
   main/p2p_stun.c              STUN Binding client (portable, host-tested)
   main/p2p_portmap*.c          NAT-PMP / UPnP-IGD port mapping + reachability (protocol code host-tested)
   main/p2p_acl.c               per-peer access rules: parser + packet matcher (portable, host-tested)
-  main/p2p_events.c            in-RAM security event log
+  main/p2p_events.c            in-RAM security event log (admin events kept apart from knock traffic)
+  main/p2p_invites.c           one-scan pairing invites (single-use, 15 min, RAM only)
   main/p2p_web.c, www/         web UI + JSON API
   main/p2p_auth.c              password hashing, sessions, lockout
   components/esp_wireguard/    vendored trombik/esp_wireguard (BSD-3) + small patch, see PATCHES.md

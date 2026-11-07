@@ -298,11 +298,14 @@
   function pickEndpoint(ack, clientIp) {
     const notes = [];
     const ep = ack.ep || "", lan = ack.lan || "";
-    if (!ep && !lan) throw new Error("the device doesn't know a reachable address yet; try again in a minute");
-    if (lan && (!ep || (clientIp && hostOf(ep) === clientIp))) {
+    // Same public IP as the device => same network (pub_ip is the device's STUN address, so this
+    // also works when ep is a DNS name). Only then use the LAN address.
+    const devPubIp = ack.pub_ip || (ep ? hostOf(ep) : "");
+    if (lan && clientIp && devPubIp && devPubIp === clientIp) {
       notes.push("You're on the same network as the device, so this config uses its LAN address and only works here.");
       return { endpoint: lan, direct: true, notes };
     }
+    if (!ep) throw new Error("the device doesn't know a reachable address yet; try again in a minute");
     const direct = ack.via === "upnp" || ack.via === "natpmp" || ack.via === "manual";
     if (!direct) {
       notes.push("The device has no router port mapping (UPnP/NAT-PMP off). The stock WireGuard app can only connect if NATs on both sides cooperate. If it doesn't connect, enable UPnP/NAT-PMP on the device's router or set a port forward + endpoint override in the device UI.");
@@ -311,46 +314,33 @@
   }
 
   // ------------------------------------------------------------------ rendezvous
-  async function makeKnock(cfg, privKey, opts = {}) {
-    const key = await envelopeKey(privKey, unb64(cfg.device.wg_pub, 32));
-    let esk;
-    for (;;) { esk = random(32); try { schnorrPubkey(esk); break; } catch (e) { /* retry */ } }
-    const now = Math.floor(Date.now() / 1000);
-    const nonce = hex(random(8));
-    const knock = { v: PROTO_VERSION, t: "knock", ts: now, n: nonce };
-    if (opts.ep) knock.ep = opts.ep;
-    if (opts.lan) knock.lan = opts.lan;
-    const content = envelopeSeal(key, enc.encode(JSON.stringify(knock)));
-    const event = await nostrEvent(esk, NOSTR_KIND, now, cfg.device.nostr_pub, content);
-    return { key, nonce, event, epub: hex(schnorrPubkey(esk)), now };
+  function throwawayNostrKey() {
+    for (;;) { const k = random(32); try { schnorrPubkey(k); return k; } catch (e) { /* retry */ } }
   }
 
-  function parseAck(pt, nonce) {
-    const m = JSON.parse(dec.decode(pt));
-    if (m.v !== PROTO_VERSION || m.t !== "ack" || m.n !== nonce) throw new Error("not our ack");
-    if (Math.abs(m.ts - Date.now() / 1000) > MAX_SKEW_S) throw new Error("stale ack (check this device's clock)");
-    return m;
-  }
-
-  // Publish an encrypted knock to every relay and resolve with the device's ack.
-  async function rendezvous(cfg, privKey, opts = {}) {
+  // Seal `message` with `key`, publish it to the device via every relay, and resolve with the
+  // first reply that opens with `key` and passes `accept(plaintextObject)` (which may throw).
+  async function exchange(cfg, key, message, accept, opts) {
     const WS = opts.WebSocket || root.WebSocket;
     const log = opts.log || (() => {});
-    const k = await makeKnock(cfg, privKey, opts);
+    const esk = throwawayNostrKey();
+    const epub = hex(schnorrPubkey(esk));
+    const now = Math.floor(Date.now() / 1000);
+    const content = envelopeSeal(key, enc.encode(JSON.stringify(message)));
+    const event = await nostrEvent(esk, NOSTR_KIND, now, cfg.device.nostr_pub, content);
     const subId = hex(random(4));
     return new Promise((resolve, reject) => {
       const sockets = [];
       let done = false, closed = 0;
-      const finish = (err, ack) => {
+      const finish = (err, val) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         for (const s of sockets) { try { s.close(); } catch (e) { /* ignore */ } }
-        if (err) reject(err); else resolve(ack);
+        if (err) reject(err); else resolve(val);
       };
-      const timer = setTimeout(() => finish(new Error(
-        "No answer from the device. Is it online, is this key authorized (and not blocked), and is this device's clock correct?")),
-        opts.timeoutMs || 25000);
+      const timer = setTimeout(() => finish(new Error(opts.timeoutMessage || "No answer from the device.")),
+                               opts.timeoutMs || 25000);
       const onGone = (url) => {
         if (done) return; // we closed it ourselves
         log(`relay ${url} closed`);
@@ -361,23 +351,90 @@
         try { ws = new WS(url); } catch (e) { onGone(url); continue; }
         sockets.push(ws);
         ws.onopen = () => {
-          ws.send(JSON.stringify(["REQ", subId, { kinds: [NOSTR_KIND], "#p": [k.epub], since: k.now - 10 }]));
-          ws.send(JSON.stringify(["EVENT", k.event]));
-          log(`knock sent via ${url}`);
+          ws.send(JSON.stringify(["REQ", subId, { kinds: [NOSTR_KIND], "#p": [epub], since: now - MAX_SKEW_S }]));
+          ws.send(JSON.stringify(["EVENT", event]));
+          log(`sent via ${url}`);
         };
         ws.onmessage = (m) => {
           let msg;
           try { msg = JSON.parse(typeof m.data === "string" ? m.data : dec.decode(m.data)); } catch (e) { return; }
-          if (msg[0] === "OK" && msg[1] === k.event.id && msg[2] === false) log(`${url} rejected the knock: ${msg[3] || ""}`);
+          if (msg[0] === "OK" && msg[1] === event.id && msg[2] === false) log(`${url} rejected the message: ${msg[3] || ""}`);
           if (msg[0] !== "EVENT" || msg.length !== 3) return;
           const ev = msg[2];
           if (!ev || ev.kind !== NOSTR_KIND || ev.pubkey !== cfg.device.nostr_pub) return;
-          try { finish(null, parseAck(envelopeOpen(k.key, ev.content), k.nonce)); } catch (e) { /* not for us */ }
+          let reply;
+          try { reply = JSON.parse(dec.decode(envelopeOpen(key, ev.content))); } catch (e) { return; } // not for us
+          try { const v = accept(reply); if (v !== undefined) finish(null, v); } catch (e) { finish(e); }
         };
         ws.onerror = () => log(`relay ${url} error`);
         ws.onclose = () => onGone(url);
       }
     });
+  }
+
+  function fresh(m) {
+    if (Math.abs(m.ts - Date.now() / 1000) > MAX_SKEW_S) throw new Error("stale reply (check this device's clock)");
+  }
+
+  function parseAck(pt, nonce) {
+    const m = JSON.parse(dec.decode(pt));
+    if (m.v !== PROTO_VERSION || m.t !== "ack" || m.n !== nonce) throw new Error("not our ack");
+    fresh(m);
+    return m;
+  }
+
+  // Knock with this client's WireGuard key and resolve with the device's ack ({ep, via, lan}).
+  async function rendezvous(cfg, privKey, opts = {}) {
+    const key = await envelopeKey(privKey, unb64(cfg.device.wg_pub, 32));
+    const nonce = hex(random(8));
+    const knock = { v: PROTO_VERSION, t: "knock", ts: Math.floor(Date.now() / 1000), n: nonce };
+    if (opts.ep) knock.ep = opts.ep;
+    if (opts.lan) knock.lan = opts.lan;
+    return exchange(cfg, key, knock, (m) => {
+      if (m.v !== PROTO_VERSION || m.t !== "ack" || m.n !== nonce) return undefined;
+      fresh(m);
+      return m;
+    }, { timeoutMessage: "No answer from the device. Is it online, is this key authorized (and not blocked), and is this device's clock correct?", ...opts });
+  }
+
+  // ------------------------------------------------------------------ pairing (invites)
+  function b64urlDecode(s) {
+    if (!/^[A-Za-z0-9_-]+$/.test(s)) throw new Error("bad invite encoding");
+    const b = s.replace(/-/g, "+").replace(/_/g, "/");
+    return unb64(b + "===".slice((b.length + 3) % 4));
+  }
+
+  // Accepts the invite link (…#p2ptun=…), just the fragment, or the bare base64url blob.
+  function parseInvite(text) {
+    const t = String(text).trim();
+    const m = /(?:#|^|[?&])p2ptun=([A-Za-z0-9_-]+)/.exec(t) || /^([A-Za-z0-9_-]{40,})$/.exec(t);
+    if (!m) throw new Error("not a p2ptun invite");
+    const inv = JSON.parse(dec.decode(b64urlDecode(m[1])));
+    if (inv.v !== 1) throw new Error("unsupported invite version");
+    const secret = b64urlDecode(inv.secret || "");
+    if (secret.length !== 16) throw new Error("bad invite secret");
+    const cfg = parseDeviceConfig(JSON.stringify({ ...inv, address: "0.0.0.0/32" }));
+    delete cfg.address;
+    return { name: String(inv.name || ""), secret, cfg };
+  }
+
+  async function pairKey(secret) { return hmacSha256(secret, enc.encode("p2ptun-pair-v1")); }
+
+  // Send this client's public key sealed with the invite secret. Resolves with the full client
+  // config ({name, address, device, relays}) on success; rejects with the device's error.
+  async function pair(invite, privKey, opts = {}) {
+    const key = await pairKey(invite.secret);
+    const nonce = hex(random(8));
+    const msg = { v: PROTO_VERSION, t: "pair", ts: Math.floor(Date.now() / 1000), n: nonce,
+                  pub: b64(await wgPubKey(privKey)) };
+    const reply = await exchange(invite.cfg, key, msg, (m) => {
+      if (m.v !== PROTO_VERSION || m.n !== nonce) return undefined;
+      fresh(m);
+      if (m.t === "pair-error") throw new Error("Pairing refused by the device: " + String(m.error || "unknown reason"));
+      if (m.t !== "paired" || !/^\d+\.\d+\.\d+\.\d+\/32$/.test(m.address || "")) return undefined;
+      return m;
+    }, { timeoutMessage: "No answer from the device. Is it online, and is the invite still valid (15 minutes, single use)?", ...opts });
+    return { ...invite.cfg, name: String(reply.name || invite.name), address: reply.address };
   }
 
   // Public IPv4 of this browser via a WebRTC STUN (srflx) candidate. null if unavailable.
@@ -425,7 +482,8 @@
     schnorrPubkey, schnorrSign, nostrEvent,
     envelopeKey, envelopeSeal, envelopeOpen,
     parseDeviceConfig, wgConfig, pickEndpoint,
-    makeKnock, parseAck, rendezvous, publicIpWebRTC,
+    parseAck, rendezvous, publicIpWebRTC,
+    parseInvite, pairKey, pair,
     lockKey, unlockKey,
   };
 });

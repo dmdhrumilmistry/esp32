@@ -59,11 +59,10 @@ static void reset_button_task(void *arg)
 static void expiry_task(void *arg)
 {
     static p2p_peer_t expired[P2P_MAX_PEERS];
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(15000));
+    for (;; vTaskDelay(pdMS_TO_TICKS(15000))) {
         time_t now = time(NULL);
         if (now < 1700000000) {
-            continue; // clock not synced yet
+            continue; // clock not synced yet (time-limited peers stay unloaded meanwhile, see p2p_tunnel.c)
         }
         int n = 0;
         p2p_config_t *cfg = p2p_config();

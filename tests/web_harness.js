@@ -43,6 +43,16 @@ async function run(req) {
       try { await P2P.unlockKey(locked, req.pass + "x"); } catch (e) { wrong = e.message; }
       return { back, wrong, alg: locked.alg };
     }
+    case "parse_invite":
+      try { const inv = P2P.parseInvite(req.text); return { name: inv.name, secret: P2P.hex(inv.secret), cfg: inv.cfg }; }
+      catch (e) { return { error: e.message }; }
+    case "pair": {
+      try {
+        const inv = P2P.parseInvite(req.link);
+        if (req.relays) inv.cfg.relays = req.relays; // tests: local ws:// relay (invites require wss://)
+        return { cfg: await P2P.pair(inv, P2P.unb64(req.priv), { timeoutMs: req.timeout_ms || 6000 }) };
+      } catch (e) { return { error: e.message }; }
+    }
     case "rendezvous": {
       const ack = await P2P.rendezvous(req.cfg, P2P.unb64(req.priv), { ep: req.ep, timeoutMs: req.timeout_ms || 6000 });
       return { ack };
