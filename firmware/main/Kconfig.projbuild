@@ -21,6 +21,14 @@ config P2PTUN_RELAYS
         Relays only forward small, end-to-end encrypted "knock"/"ack" messages that
         carry public ip:port pairs. They never see tunnel traffic. Max 3 are used.
 
+config P2PTUN_PORTMAP
+    bool "Ask the router to forward the WireGuard port (NAT-PMP / UPnP-IGD)"
+    default y
+    help
+        Makes the device reachable from any network, so phones and other clients can use the
+        stock WireGuard app without hole punching. Only the WireGuard port is mapped; WireGuard
+        ignores every packet that isn't from an authorized key.
+
 config P2PTUN_STUN_SERVERS
     string "STUN servers (comma separated host:port)"
     default "stun.l.google.com:19302,stun.cloudflare.com:3478"

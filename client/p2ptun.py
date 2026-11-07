@@ -4,7 +4,9 @@
   python3 p2ptun.py genkey            # create p2ptun.json with a new WireGuard key, print the public key
   python3 p2ptun.py join '<json>'     # paste the config the device's web UI shows after you authorize the key
   sudo python3 p2ptun.py up           # Linux: rendezvous via Nostr, hole-punch, bring up WireGuard, stay connected
-  python3 p2ptun.py resolve           # any OS: rendezvous and print a wg-quick config to import right away
+  python3 p2ptun.py resolve -o p2ptun.conf   # any OS: rendezvous and write a config for the WireGuard app
+
+Phones (Android/iOS) and any other OS can also use the browser client in web/ (no Python needed).
 
 See ../docs/PROTOCOL.md for how it works.
 """
@@ -191,8 +193,10 @@ def knock(cfg: dict, args) -> tuple[str, str, str]:
     log(f"my public endpoint {my_ep} (LAN {lan})")
     ack = asyncio.run(rendezvous(cfg, my_ep, lan))
     ep = pick_endpoint(ack, my_ep)
-    log(f"device answered: {ack.get('ep') or '?'} → using {ep}")
-    return ep, my_ep, lan
+    via = ack.get("via", "stun")
+    how = "router port mapping" if via in ("upnp", "natpmp") else "manual endpoint" if via == "manual" else "hole punching"
+    log(f"device answered: {ack.get('ep') or '?'} via {how} → using {ep}")
+    return ep, my_ep, lan, via
 
 # ---------------------------------------------------------------------------
 # Linux WireGuard plumbing
@@ -243,7 +247,7 @@ def cmd_up(args):
     require_joined(cfg)
     dev_pub = cfg["device"]["wg_pub"]
 
-    ep, my_ep, lan = knock(cfg, args)
+    ep, my_ep, lan, _ = knock(cfg, args)
     wg_up(cfg, args.iface, args.port, ep)
 
     stop = False
@@ -285,22 +289,31 @@ def cmd_up(args):
 def cmd_resolve(args):
     cfg = load_cfg(Path(args.config))
     require_joined(cfg)
-    ep, _, _ = knock(cfg, args)
+    ep, _, _, via = knock(cfg, args)
     dev = cfg["device"]
     allowed = ", ".join([dev["tunnel_ip"] + "/32"] + dev.get("routes", []))
-    print(f"""
-# Import into WireGuard within ~30 s; ListenPort MUST stay {args.port} (the NAT mapping we just punched).
-[Interface]
+    direct = via in proto.DIRECT_VIA
+    head = ("# The device is directly reachable: this config keeps working until its public address changes.\n"
+            if direct else
+            f"# Hole punching: import into WireGuard within ~30 s; ListenPort MUST stay {args.port}.\n")
+    listen = "" if direct else f"ListenPort = {args.port}\n"
+    conf = f"""{head}[Interface]
 PrivateKey = {cfg['private_key']}
 Address = {cfg['address']}
-ListenPort = {args.port}
-
+{listen}
 [Peer]
 PublicKey = {dev['wg_pub']}
 Endpoint = {ep}
 AllowedIPs = {allowed}
 PersistentKeepalive = 25
-""")
+"""
+    if args.out:
+        fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # contains the private key
+        with os.fdopen(fd, "w") as f:
+            f.write(conf)
+        log(f"wrote {args.out}: import it into the WireGuard app")
+    else:
+        print("\n" + conf)
 
 
 def cmd_show(args):
@@ -322,6 +335,8 @@ def main():
         p.add_argument("--stun", nargs="+", default=DEFAULT_STUN, metavar="HOST:PORT")
         if name == "up":
             p.add_argument("--iface", default=DEFAULT_IFACE)
+        else:
+            p.add_argument("-o", "--out", help="write the config to this file (mode 600) instead of printing it")
     sub.add_parser("pubkey", help="print this client's public key")
     args = ap.parse_args()
     {"genkey": cmd_genkey, "join": cmd_join, "up": cmd_up, "resolve": cmd_resolve, "pubkey": cmd_show}[args.cmd](args)

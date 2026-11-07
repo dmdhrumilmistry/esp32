@@ -8,12 +8,19 @@
 //   p2p_host open    <my_priv_b64> <peer_pub_b64> <content_b64>
 //   p2p_host stunreq <txid_hex>
 //   p2p_host stunparse <pkt_hex> <txid_hex>
+//   p2p_host natpmp-map <internal> <external> <lifetime>      -> request hex
+//   p2p_host natpmp-ext <resp_hex> | natpmp-mapped <resp_hex> <internal>
+//   p2p_host ssdp-location <file> | igd <xml_file> | urlres <base> <ref>
+//   p2p_host soap-add <service_type> <ext> <int> <client> <lease> | soap-extip <file> | soap-err <file>
+//   p2p_host http <file>                                         -> "<status>\n<body>"
+//   p2p_host private <a.b.c.d>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "p2p_crypto.h"
 #include "p2p_stun.h"
+#include "p2p_portmap_proto.h"
 
 static int urandom(void *ctx, unsigned char *out, size_t len)
 {
@@ -40,6 +47,18 @@ static void b64key(const char *s, uint8_t out[32])
         fprintf(stderr, "bad key: %s\n", s);
         exit(2);
     }
+}
+
+static char *slurp(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) exit(2);
+    static char buf[65536];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    if (len) *len = n;
+    return buf;
 }
 
 int main(int argc, char **argv)
@@ -116,6 +135,64 @@ int main(int argc, char **argv)
         hexarg(argv[3], txid, 12);
         if (!p2p_stun_parse_response(pkt, n, txid, ip, &port)) return 3;
         printf("%u.%u.%u.%u:%u\n", ip[0], ip[1], ip[2], ip[3], port);
+    } else if (!strcmp(cmd, "natpmp-map") && argc == 5) {
+        uint8_t req[12];
+        p2p_natpmp_req_map_udp((uint16_t)atoi(argv[2]), (uint16_t)atoi(argv[3]), (uint32_t)strtoul(argv[4], NULL, 10), req);
+        p2p_hex_encode(req, sizeof(req), hex);
+        puts(hex);
+    } else if (!strcmp(cmd, "natpmp-ext") && argc == 3) {
+        uint8_t pkt[64], ip[4];
+        size_t n = strlen(argv[2]) / 2;
+        if (n > sizeof(pkt)) return 2;
+        hexarg(argv[2], pkt, n);
+        if (!p2p_natpmp_parse_extaddr(pkt, n, ip)) return 3;
+        printf("%u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
+    } else if (!strcmp(cmd, "natpmp-mapped") && argc == 4) {
+        uint8_t pkt[64];
+        uint16_t ext;
+        uint32_t life;
+        size_t n = strlen(argv[2]) / 2;
+        if (n > sizeof(pkt)) return 2;
+        hexarg(argv[2], pkt, n);
+        if (!p2p_natpmp_parse_map_udp(pkt, n, (uint16_t)atoi(argv[3]), &ext, &life)) return 3;
+        printf("%u %lu\n", ext, (unsigned long)life);
+    } else if (!strcmp(cmd, "ssdp-location") && argc == 3) {
+        char url[256];
+        if (!p2p_ssdp_location(slurp(argv[2], NULL), url, sizeof(url))) return 3;
+        puts(url);
+    } else if (!strcmp(cmd, "igd") && argc == 3) {
+        char st[128], cu[256];
+        if (!p2p_igd_find_control(slurp(argv[2], NULL), st, sizeof(st), cu, sizeof(cu))) return 3;
+        printf("%s %s\n", st, cu);
+    } else if (!strcmp(cmd, "urlres") && argc == 4) {
+        char out[512], host[64], path[256];
+        uint16_t port;
+        if (!p2p_url_resolve(argv[2], argv[3], out, sizeof(out))) return 3;
+        if (!p2p_url_split(out, host, sizeof(host), &port, path, sizeof(path))) return 4;
+        printf("%s %s %u %s\n", out, host, port, path);
+    } else if (!strcmp(cmd, "soap-add") && argc == 7) {
+        char out[2048];
+        if (p2p_soap_add_mapping(argv[2], (uint16_t)atoi(argv[3]), (uint16_t)atoi(argv[4]), argv[5],
+                                 (uint32_t)strtoul(argv[6], NULL, 10), out, sizeof(out)) < 0) return 3;
+        fputs(out, stdout);
+    } else if (!strcmp(cmd, "soap-extip") && argc == 3) {
+        uint8_t ip[4];
+        if (!p2p_soap_parse_external_ip(slurp(argv[2], NULL), ip)) return 3;
+        printf("%u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
+    } else if (!strcmp(cmd, "soap-err") && argc == 3) {
+        printf("%d\n", p2p_soap_error_code(slurp(argv[2], NULL)));
+    } else if (!strcmp(cmd, "http") && argc == 3) {
+        size_t n;
+        char *r = slurp(argv[2], &n);
+        int st = p2p_http_status(r);
+        char *body = p2p_http_body(r, n);
+        if (!body) return 3;
+        printf("%d\n%s", st, body);
+    } else if (!strcmp(cmd, "private") && argc == 3) {
+        unsigned a, b, c, d;
+        if (sscanf(argv[2], "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 2;
+        uint8_t ip[4] = {a, b, c, d};
+        puts(p2p_ip_is_private(ip) ? "private" : "public");
     } else {
         fprintf(stderr, "bad usage\n");
         return 2;

@@ -163,6 +163,16 @@ bool p2p_tunnel_public_endpoint(char *out, size_t len)
     return true;
 }
 
+bool p2p_tunnel_public_ip(uint8_t ip[4])
+{
+    int64_t t = s_pub_time_us;
+    if (t == 0 || esp_timer_get_time() - t > 120LL * 1000000) {
+        return false;
+    }
+    memcpy(ip, s_pub_ip, 4);
+    return true;
+}
+
 static bool sta_ip(esp_netif_ip_info_t *info)
 {
     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");

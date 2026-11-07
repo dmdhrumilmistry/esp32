@@ -13,6 +13,7 @@
 #include "p2p_auth.h"
 #include "p2p_config.h"
 #include "p2p_crypto.h"
+#include "p2p_portmap.h"
 #include "p2p_signal.h"
 #include "p2p_tunnel.h"
 
@@ -226,6 +227,12 @@ static esp_err_t h_state(httpd_req_t *req)
     cJSON_AddStringToObject(dev, "lan_subnet", p2p_tunnel_lan_subnet(buf, sizeof(buf)) ? buf : "");
     cJSON_AddStringToObject(dev, "public_ep", p2p_tunnel_public_endpoint(buf, sizeof(buf)) ? buf : "");
     cJSON_AddStringToObject(dev, "lan_ep", p2p_tunnel_lan_endpoint(buf, sizeof(buf)) ? buf : "");
+    const char *via = "";
+    cJSON_AddStringToObject(dev, "reach_ep", p2p_reach_endpoint(buf, sizeof(buf), &via) ? buf : "");
+    cJSON_AddStringToObject(dev, "reach_via", via);
+    p2p_portmap_status(buf, sizeof(buf));
+    cJSON_AddStringToObject(dev, "reach_status", buf);
+    cJSON_AddStringToObject(dev, "ep_override", p2p_config()->ep_override);
     if (p2p_signal_relays_json(buf, sizeof(buf))) {
         cJSON_AddItemToObject(dev, "relays", cJSON_Parse(buf));
     }
@@ -501,6 +508,44 @@ static esp_err_t h_relays(httpd_req_t *req)
     return send_json_str(req, "200 OK", "{\"ok\":true,\"reboot_required\":true}");
 }
 
+// "host:port" (DNS name or IPv4) or "" to go back to automatic detection.
+static bool valid_endpoint(const char *s)
+{
+    if (!*s) {
+        return true;
+    }
+    const char *colon = strrchr(s, ':');
+    if (!colon || colon == s || colon - s > 63) {
+        return false;
+    }
+    for (const char *p = s; p < colon; p++) {
+        char c = *p;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-')) {
+            return false;
+        }
+    }
+    char *end;
+    long port = strtol(colon + 1, &end, 10);
+    return *end == '\0' && end != colon + 1 && port > 0 && port <= 65535;
+}
+
+static esp_err_t h_endpoint(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *j = read_json(req);
+    const char *ep = j ? jstr(j, "endpoint") : NULL;
+    esp_err_t r;
+    if (!ep || strlen(ep) >= sizeof(p2p_config()->ep_override) || !valid_endpoint(ep)) {
+        r = send_error(req, "400 Bad Request", "endpoint must be host:port (or empty for automatic)");
+    } else if (p2p_config_save_ep_override(ep) != ESP_OK) {
+        r = send_error(req, "500 Internal Server Error", "saving failed");
+    } else {
+        r = send_ok(req);
+    }
+    cJSON_Delete(j);
+    return r;
+}
+
 static esp_err_t h_reboot(httpd_req_t *req)
 {
     REQUIRE_AUTH(req);
@@ -546,6 +591,7 @@ esp_err_t p2p_web_start(bool setup_mode)
         {"/api/peers/delete", HTTP_POST, h_peer_delete},
         {"/api/peers/config", HTTP_POST, h_peer_config},
         {"/api/relays", HTTP_POST, h_relays},
+        {"/api/endpoint", HTTP_POST, h_endpoint},
         {"/api/reboot", HTTP_POST, h_reboot},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

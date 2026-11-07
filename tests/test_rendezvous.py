@@ -114,9 +114,10 @@ class SimDevice:
                     if knock["t"] != "knock" or knock["ts"] <= self.last_ts.get(pub, 0):
                         break
                     self.last_ts[pub] = knock["ts"]
-                    self.punched.append(knock["ep"])
+                    self.punched.append(knock.get("ep"))
                     ack = json.dumps({"v": 1, "t": "ack", "ts": int(time.time()), "n": knock["n"],
-                                      "ep": self.public_ep, "lan": "192.168.1.50:51820"}, separators=(",", ":"))
+                                      "ep": self.public_ep, "via": "stun",
+                                      "lan": "192.168.1.50:51820"}, separators=(",", ":"))
                     _, content = c("seal", proto.b64(self.priv), proto.b64(pub), ack)
                     _, out = c("event", self.nsk, str(proto.NOSTR_KIND), str(int(time.time())), ev["pubkey"], content)
                     await ws.send(json.dumps(["EVENT", json.loads(out)]))

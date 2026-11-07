@@ -15,6 +15,7 @@
 
 #include "p2p_config.h"
 #include "p2p_crypto.h"
+#include "p2p_portmap.h"
 #include "p2p_tunnel.h"
 
 static const char *TAG = "signal";
@@ -221,9 +222,9 @@ static void handle_knock(const p2p_peer_t *peer, peer_state_t *ps, const cJSON *
     const cJSON *lan = cJSON_GetObjectItem(msg, "lan");
     uint8_t nonce_bin[16];
     size_t nonce_len = cJSON_IsString(nonce) ? strlen(nonce->valuestring) : 0;
-    // nonce is echoed into the ack: require short lowercase/uppercase hex only
+    // nonce is echoed into the ack: require short hex only
     if (!cJSON_IsNumber(ts) || nonce_len == 0 || nonce_len > 32 || (nonce_len % 2) != 0 ||
-        !p2p_hex_decode(nonce->valuestring, nonce_bin, nonce_len / 2) || !cJSON_IsString(ep)) {
+        !p2p_hex_decode(nonce->valuestring, nonce_bin, nonce_len / 2)) {
         return;
     }
     // Replay protection: fresh timestamp, strictly increasing per peer.
@@ -234,42 +235,48 @@ static void handle_knock(const p2p_peer_t *peer, peer_state_t *ps, const cJSON *
     }
     ps->last_ts = t;
 
+    char my_ep[80] = "", my_lan_ep[24] = "", stun_ep[24] = "";
+    const char *via = "";
+    p2p_reach_endpoint(my_ep, sizeof(my_ep), &via);
+    p2p_tunnel_lan_endpoint(my_lan_ep, sizeof(my_lan_ep));
+    bool have_stun = p2p_tunnel_public_endpoint(stun_ep, sizeof(stun_ep));
+
+    // "ep" is optional: desktop clients send the public endpoint of their WireGuard port and we
+    // punch towards it; browser/phone clients can't know it and rely on the device being reachable.
     uint8_t ip[4];
     uint16_t port;
-    if (!parse_ep(ep->valuestring, ip, &port)) {
-        return;
-    }
-    char my_pub_ep[24] = "", my_lan_ep[24] = "";
-    bool have_pub = p2p_tunnel_public_endpoint(my_pub_ep, sizeof(my_pub_ep));
-    p2p_tunnel_lan_endpoint(my_lan_ep, sizeof(my_lan_ep));
-
-    // Same public IP => client is behind our NAT; hairpinning often fails, use its LAN address.
-    uint8_t lip[4];
-    uint16_t lport;
-    char my_pub_ip[20] = "";
-    snprintf(my_pub_ip, sizeof(my_pub_ip), "%u.%u.%u.%u:", ip[0], ip[1], ip[2], ip[3]);
-    if (have_pub && strncmp(my_pub_ep, my_pub_ip, strlen(my_pub_ip)) == 0 &&
-        cJSON_IsString(lan) && parse_ep(lan->valuestring, lip, &lport)) {
-        memcpy(ip, lip, 4);
-        port = lport;
-    }
-
-    esp_err_t err = p2p_tunnel_set_endpoint(peer->pub, ip, port);
-    ESP_LOGI(TAG, "knock from '%s' -> punching %u.%u.%u.%u:%u (%s)", peer->name, ip[0], ip[1], ip[2], ip[3], port,
-             esp_err_to_name(err));
-    if (err != ESP_OK) {
-        return;
+    if (cJSON_IsString(ep) && parse_ep(ep->valuestring, ip, &port)) {
+        // Same public IP => client is behind our NAT; hairpinning often fails, use its LAN address.
+        uint8_t lip[4];
+        uint16_t lport;
+        char client_ip[20];
+        snprintf(client_ip, sizeof(client_ip), "%u.%u.%u.%u:", ip[0], ip[1], ip[2], ip[3]);
+        if (have_stun && strncmp(stun_ep, client_ip, strlen(client_ip)) == 0 &&
+            cJSON_IsString(lan) && parse_ep(lan->valuestring, lip, &lport)) {
+            memcpy(ip, lip, 4);
+            port = lport;
+        }
+        esp_err_t err = p2p_tunnel_set_endpoint(peer->pub, ip, port);
+        ESP_LOGI(TAG, "knock from '%s' -> punching %u.%u.%u.%u:%u (%s)", peer->name, ip[0], ip[1], ip[2], ip[3],
+                 port, esp_err_to_name(err));
+        if (err != ESP_OK) {
+            return; // peer not loaded in WireGuard
+        }
+    } else {
+        ESP_LOGI(TAG, "knock from '%s' (no endpoint: client will dial %s via %s)", peer->name,
+                 my_ep[0] ? my_ep : "?", via);
     }
 
-    char pt[256];
-    snprintf(pt, sizeof(pt), "{\"v\":%d,\"t\":\"ack\",\"ts\":%lld,\"n\":\"%s\",\"ep\":\"%s\",\"lan\":\"%s\"}",
-             PROTO_VERSION, (long long)now, nonce->valuestring, my_pub_ep, my_lan_ep);
-    char content[512];
+    char pt[384];
+    snprintf(pt, sizeof(pt),
+             "{\"v\":%d,\"t\":\"ack\",\"ts\":%lld,\"n\":\"%s\",\"ep\":\"%s\",\"via\":\"%s\",\"lan\":\"%s\"}",
+             PROTO_VERSION, (long long)now, nonce->valuestring, my_ep, via, my_lan_ep);
+    char content[640];
     if (p2p_envelope_seal(ps->key, (const uint8_t *)pt, strlen(pt), content, sizeof(content)) != 0) {
         return;
     }
-    char *ev = malloc(1100);
-    if (ev && p2p_nostr_event(s_nsk, CONFIG_P2PTUN_NOSTR_KIND, (uint64_t)now, sender_npub, content, ev, 1100) > 0) {
+    char *ev = malloc(1280);
+    if (ev && p2p_nostr_event(s_nsk, CONFIG_P2PTUN_NOSTR_KIND, (uint64_t)now, sender_npub, content, ev, 1280) > 0) {
         publish(ev);
     }
     free(ev);

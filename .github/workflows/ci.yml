@@ -9,13 +9,16 @@ permissions:
 
 jobs:
   host-tests:
-    name: Crypto/protocol interop tests (host)
+    name: Interop tests (C firmware code, Python and web clients)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"  # global WebSocket + WebCrypto X25519 for the web client tests
       - run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
       - run: pip install -r client/requirements.txt -r tests/requirements.txt
       - run: make -C tests/host

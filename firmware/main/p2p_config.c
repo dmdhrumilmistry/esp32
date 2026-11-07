@@ -52,6 +52,7 @@ esp_err_t p2p_config_load(void)
     get_str(h, "ssid", s_cfg.ssid, sizeof(s_cfg.ssid));
     get_str(h, "wifi_pass", s_cfg.wifi_pass, sizeof(s_cfg.wifi_pass));
     get_str(h, "relays", s_cfg.relays, sizeof(s_cfg.relays));
+    get_str(h, "ep_override", s_cfg.ep_override, sizeof(s_cfg.ep_override));
     if (s_cfg.relays[0] == '\0') {
         strlcpy(s_cfg.relays, CONFIG_P2PTUN_RELAYS, sizeof(s_cfg.relays));
     }
@@ -113,6 +114,12 @@ esp_err_t p2p_config_save_relays(const char *relays)
 {
     strlcpy(s_cfg.relays, relays, sizeof(s_cfg.relays));
     return commit("relays", NULL, 0, s_cfg.relays);
+}
+
+esp_err_t p2p_config_save_ep_override(const char *ep)
+{
+    strlcpy(s_cfg.ep_override, ep, sizeof(s_cfg.ep_override));
+    return commit("ep_override", NULL, 0, s_cfg.ep_override);
 }
 
 esp_err_t p2p_config_save_peers(void)

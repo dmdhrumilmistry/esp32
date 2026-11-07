@@ -3,6 +3,8 @@ idf_component_register(
          "p2p_config.c"
          "p2p_crypto.c"
          "p2p_stun.c"
+         "p2p_portmap_proto.c"
+         "p2p_portmap.c"
          "p2p_tunnel.c"
          "p2p_signal.c"
          "p2p_auth.c"

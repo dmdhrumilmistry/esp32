@@ -17,6 +17,7 @@
 
 #include "p2p_config.h"
 #include "p2p_crypto.h"
+#include "p2p_portmap.h"
 #include "p2p_signal.h"
 #include "p2p_tunnel.h"
 #include "p2p_web.h"
@@ -99,6 +100,7 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(p2p_tunnel_start());
+    ESP_ERROR_CHECK(p2p_portmap_start());
     ESP_ERROR_CHECK(p2p_signal_start());
     ESP_ERROR_CHECK(p2p_web_start(false));
     ESP_LOGI(TAG, "ready: manage peers at http://<device-ip>/ (LAN) or http://%s.1/ (tunnel)",

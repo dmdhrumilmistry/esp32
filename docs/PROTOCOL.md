@@ -47,15 +47,21 @@ have produced it. Blocked or deleted peers are never tried, so they get no answe
 // client → device
 {"v":1,"t":"knock","ts":1730000000,"n":"9f2c4a1be07d3355","ep":"203.0.113.9:40001","lan":"10.0.0.5:51821"}
 // device → client
-{"v":1,"t":"ack","ts":1730000001,"n":"9f2c4a1be07d3355","ep":"198.51.100.20:51820","lan":"192.168.1.50:51820"}
+{"v":1,"t":"ack","ts":1730000001,"n":"9f2c4a1be07d3355","ep":"198.51.100.20:51820","via":"upnp","lan":"192.168.1.50:51820"}
 ```
 
 * `ts`: Unix time. The device rejects |skew| > 120 s and any `ts` ≤ the last accepted one for that
   peer (replay protection; the device syncs time over SNTP).
 * `n`: client nonce (hex, ≤ 32 chars), echoed in the ack so the client only accepts the answer to
   *this* knock.
-* `ep`: public endpoint from STUN, discovered on the **same UDP port WireGuard uses**. On the
-  ESP32, STUN runs through the WireGuard socket itself (see `firmware/components/esp_wireguard/PATCHES.md`).
+* `ep` (knock, **optional**): the client's public endpoint from STUN, discovered on the **same UDP
+  port its WireGuard uses**. If present, the device hole-punches towards it. The desktop Python client
+  always sends it. The browser client can't know the WireGuard app's mapping, so it sends only its
+  public IP (from a WebRTC STUN candidate) plus its fixed `ListenPort` 51821 as a best guess.
+* `ep` (ack): the endpoint clients should dial, chosen by `via`:
+  `manual` (admin-set `host:port`, may be a DNS name) > `upnp` / `natpmp` (verified router port
+  mapping) > `stun` (the device's own STUN result on the WireGuard socket; on the ESP32 STUN runs
+  through the WireGuard socket itself, see `firmware/components/esp_wireguard/PATCHES.md`).
 * `lan`: local endpoint. If both sides report the same public IP they're behind the same NAT, and
   the LAN address is used (most routers don't support hairpinning).
 
@@ -67,6 +73,28 @@ NIP-01 event, kind **21820** (ephemeral range: relays forward it but don't store
 
 The device subscribes with `{"kinds":[21820],"#p":[<device npub>],"since":now-60}` on up to 3
 relays and de-duplicates events by id.
+
+## Reachability: why phones work
+
+The stock WireGuard apps (Android, iOS, Windows, macOS) can't take part in the knock, so they
+only work if the device can be dialled directly. The device tries to make that true:
+
+1. **NAT-PMP** (RFC 6886) to the default gateway, then **UPnP-IGD** (SSDP → device description →
+   SOAP `AddPortMapping`) for `UDP <public>:51820 → <esp32>:51820`, renewed at half the lease.
+   Only answers from the default gateway are accepted.
+2. The router's claimed external IP is **cross-checked against STUN**. If it's private (double NAT
+   or CGNAT) or differs from what STUN sees, the mapping isn't advertised.
+3. An admin can set a **manual endpoint** (a router port forward, optionally a DDNS name).
+
+Opening the port is low-risk: only WireGuard listens on it, and WireGuard drops every packet that
+isn't authenticated by an authorized key (it doesn't even reply). If none of this is available,
+`via` is `stun` and only hole punching remains.
+
+| Client | Device reachable (`manual`/`upnp`/`natpmp`) | Hole punching only (`stun`) |
+|---|---|---|
+| Python client `up` (Linux) | ✅ | ✅ unless both sides are behind symmetric NAT |
+| Python client `resolve` + WireGuard app (Windows/macOS) | ✅ | ✅ if imported within ~30 s |
+| Browser client + WireGuard app (Android, iOS, any OS) | ✅ | ⚠️ only with port-preserving, permissive NAT |
 
 ## Hole punching
 

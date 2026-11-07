@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import socket
 import struct
 import time
@@ -178,12 +179,17 @@ def parse_ack(pt: bytes, expect_nonce: str) -> dict:
 
 
 def parse_endpoint(s: str) -> tuple[str, int]:
+    """host:port where host is an IPv4 literal or a DNS name (manual endpoint / DDNS)."""
     host, _, port = s.rpartition(":")
-    socket.inet_aton(host)  # IPv4 only (validates)
+    if not re.fullmatch(r"[A-Za-z0-9.-]{1,63}", host or ""):
+        raise ValueError("bad endpoint host")
     p = int(port)
     if not 0 < p < 65536:
         raise ValueError("bad port")
     return host, p
+
+
+DIRECT_VIA = ("upnp", "natpmp", "manual")  # device reachable without hole punching
 
 # ---------------------------------------------------------------------------
 # STUN (RFC 5389 Binding)

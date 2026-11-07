@@ -27,6 +27,8 @@ void p2p_tunnel_peer_status(const uint8_t pub[32], p2p_peer_status_t *out);
 
 // Public ip:port of the WireGuard socket as seen by STUN. False if unknown.
 bool p2p_tunnel_public_endpoint(char *out, size_t len);
+// Public IPv4 address from STUN. False if unknown.
+bool p2p_tunnel_public_ip(uint8_t ip[4]);
 // LAN ip:port of the WireGuard socket (for clients behind the same NAT).
 bool p2p_tunnel_lan_endpoint(char *out, size_t len);
 // LAN subnet in CIDR form, e.g. "192.168.1.0/24".
