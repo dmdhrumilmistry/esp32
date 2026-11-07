@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>p2ptun</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1b1f24;--mute:#667085;--line:#e4e7ec;--acc:#2563eb;--ok:#16a34a;--bad:#dc2626;--warn:#d97706;--code:#f1f3f6}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--fg:#e6e8eb;--mute:#98a2b3;--line:#2a2f3a;--acc:#60a5fa;--ok:#22c55e;--bad:#f87171;--warn:#fbbf24;--code:#11141a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:920px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:20px;margin:0}h2{font-size:16px;margin:0 0 12px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px 20px}
+.k{color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all}
+label{display:block;font-size:13px;color:var(--mute);margin:10px 0 4px}
+input,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+textarea{font-family:ui-monospace,Menlo,monospace;font-size:12px;min-height:120px}
+button{padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;cursor:pointer}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button.danger{color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{font-size:12px;color:var(--mute);font-weight:500}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--mute)}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}.dot.warn{background:var(--warn)}
+.msg{margin-top:10px;font-size:13px}.msg.err{color:var(--bad)}.msg.good{color:var(--ok)}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-all}
+.hide{display:none}
+.narrow{max-width:420px;margin:40px auto}
+td.v{word-break:normal;white-space:nowrap}
+.mono-k{color:var(--mute);font:12px ui-monospace,Menlo,monospace}
+.pill{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+@media (max-width:640px){.hide-sm{display:none}td,th{padding:8px 3px}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>🔐 p2ptun</h1><div class="row"><span id="who" class="pill hide"></span><button id="logout" class="hide">Log out</button></div></header>
+
+<!-- SETUP -->
+<section id="v-setup" class="card narrow hide">
+  <h2>First-time setup</h2>
+  <p class="k" style="text-transform:none">Connect the device to your network and choose an admin password.</p>
+  <form id="f-setup">
+    <label>Wi-Fi network (SSID)</label><input name="ssid" required maxlength="32" autocomplete="off">
+    <label>Wi-Fi password</label><input name="wifi_pass" type="password" maxlength="63">
+    <label>Admin password (min 10 characters)</label><input name="admin_pass" type="password" required minlength="10" maxlength="128" autocomplete="new-password">
+    <label>Repeat admin password</label><input name="admin_pass2" type="password" required minlength="10" maxlength="128" autocomplete="new-password">
+    <div class="row" style="margin-top:14px"><button class="primary">Save &amp; reboot</button></div>
+    <div class="msg" id="m-setup"></div>
+  </form>
+</section>
+
+<!-- LOGIN -->
+<section id="v-login" class="card narrow hide">
+  <h2>Admin login</h2>
+  <form id="f-login">
+    <label>Password</label><input name="password" type="password" required autocomplete="current-password" autofocus>
+    <div class="row" style="margin-top:14px"><button class="primary">Log in</button></div>
+    <div class="msg" id="m-login"></div>
+  </form>
+</section>
+
+<!-- ADMIN -->
+<section id="v-admin" class="hide">
+  <div class="card">
+    <h2>Device</h2>
+    <div class="grid">
+      <div><div class="k">Public endpoint (STUN)</div><div class="v" id="d-pub"></div></div>
+      <div><div class="k">LAN subnet exposed</div><div class="v" id="d-lan"></div></div>
+      <div><div class="k">Tunnel address</div><div class="v" id="d-tun"></div></div>
+      <div><div class="k">Signaling relays</div><div class="v" id="d-relays"></div></div>
+      <div style="grid-column:1/-1"><div class="k">WireGuard public key</div><div class="v" id="d-wg"></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><h2>Peers <span class="pill" id="p-count"></span></h2><span class="k" style="text-transform:none">auto-refresh 5 s</span></div>
+    <table>
+      <thead><tr><th>Name</th><th>Status</th><th class="hide-sm">Tunnel IP</th><th class="hide-sm">Endpoint</th><th></th></tr></thead>
+      <tbody id="peers"></tbody>
+    </table>
+    <p id="no-peers" class="k hide" style="text-transform:none">No peers yet. Add one below.</p>
+  </div>
+
+  <div class="card">
+    <h2>Authorize a client</h2>
+    <p class="k" style="text-transform:none">On the client run <code>python3 p2ptun.py genkey</code> and paste the public key it prints.</p>
+    <form id="f-add">
+      <div class="grid">
+        <div><label>Name</label><input name="name" required maxlength="23" pattern="[A-Za-z0-9 _.\-]+" placeholder="laptop"></div>
+        <div><label>Client WireGuard public key</label><input name="pubkey" required maxlength="44" minlength="44" placeholder="base64, 44 chars" autocomplete="off"></div>
+      </div>
+      <div class="row" style="margin-top:14px"><button class="primary">Authorize</button></div>
+      <div class="msg" id="m-add"></div>
+    </form>
+    <div id="cfg-box" class="hide">
+      <label>Client config for <b id="cfg-name"></b>. Run this on the client, then <code>sudo python3 p2ptun.py up</code>:</label>
+      <pre id="cfg-cmd"></pre>
+      <div class="row"><button id="cfg-copy">Copy</button><button id="cfg-close">Close</button></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Settings</h2>
+    <div class="grid">
+      <form id="f-pass">
+        <label>Current password</label><input name="current" type="password" required autocomplete="current-password">
+        <label>New password (min 10)</label><input name="new" type="password" required minlength="10" maxlength="128" autocomplete="new-password">
+        <div class="row" style="margin-top:12px"><button>Change password</button></div>
+        <div class="msg" id="m-pass"></div>
+      </form>
+      <form id="f-relays">
+        <label>Nostr relays (1–3, comma separated wss:// URLs)</label><input name="relays" required>
+        <div class="row" style="margin-top:12px"><button>Save relays</button><button type="button" id="reboot" class="danger">Reboot</button></div>
+        <div class="msg" id="m-relays"></div>
+      </form>
+    </div>
+  </div>
+</section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let state = null, timer = null;
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+  opt.credentials = "same-origin";
+  const r = await fetch(path, opt);
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (!r.ok) { if (r.status === 401 && path !== "/api/login") load(); throw new Error(j.error || ("HTTP " + r.status)); }
+  return j;
+}
+function msg(id, text, good) { const m = $(id); m.textContent = text || ""; m.className = "msg " + (good ? "good" : "err"); }
+function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+function show(view) {
+  for (const v of ["setup", "login", "admin"]) $("v-" + v).classList.toggle("hide", v !== view);
+  $("logout").classList.toggle("hide", view !== "admin");
+}
+function ago(s) { if (s < 0) return "never"; if (s < 60) return s + "s ago"; if (s < 3600) return Math.floor(s / 60) + "m ago"; return Math.floor(s / 3600) + "h ago"; }
+
+async function load() {
+  try { state = await api("/api/state"); } catch (e) { return; }
+  show(state.mode);
+  clearInterval(timer);
+  if (state.mode === "admin") { render(); timer = setInterval(refresh, 5000); }
+}
+async function refresh() {
+  try { const s = await api("/api/state"); if (s.mode !== "admin") return load(); state = s; render(); } catch (e) {}
+}
+
+function render() {
+  const d = state.device;
+  $("d-pub").textContent = d.public_ep || "discovering… (is UDP blocked?)";
+  $("d-lan").textContent = d.lan_subnet || "—";
+  $("d-tun").textContent = d.tunnel_ip;
+  $("d-wg").textContent = d.wg_pub;
+  const rel = $("d-relays"); rel.textContent = "";
+  for (const r of (d.relays || [])) {
+    const line = el("div"); line.append(el("span", "", "dot " + (r.connected ? "ok" : "bad")), el("span", r.url.replace("wss://", "")));
+    rel.append(line);
+  }
+  const f = $("f-relays").relays;
+  if (document.activeElement !== f) f.value = (d.relays || []).map(r => r.url).join(",");
+
+  const tb = $("peers"); tb.textContent = "";
+  $("no-peers").classList.toggle("hide", state.peers.length > 0);
+  $("p-count").textContent = state.peers.length + " / " + state.max_peers;
+  for (const p of state.peers) {
+    const tr = el("tr");
+    const name = el("td"); name.append(el("div", p.name)); name.append(el("div", p.pubkey.slice(0, 12) + "…", "mono-k"));
+    let cls = "warn", txt = "idle";
+    if (!p.enabled) { cls = "bad"; txt = "blocked"; }
+    else if (p.up && p.last_rx_s >= 0 && p.last_rx_s < 180) { cls = "ok"; txt = "connected · " + ago(p.last_rx_s); }
+    else if (p.last_rx_s >= 0) { txt = "last seen " + ago(p.last_rx_s); }
+    const st = el("td"); st.append(el("span", "", "dot " + cls), el("span", txt));
+    const acts = el("td"); const row = el("div", undefined, "row");
+    const bCfg = el("button", "Config"); bCfg.onclick = () => peerCfg(p);
+    const bToggle = el("button", p.enabled ? (p.up ? "Disconnect & block" : "Block") : "Allow", p.enabled ? "danger" : "");
+    bToggle.onclick = () => act(p.enabled ? "disable" : "enable", p, p.enabled ? `Block ${p.name}? Its active connection is cut immediately and it can't reconnect until allowed again.` : null);
+    const bDel = el("button", "Delete", "danger"); bDel.onclick = () => act("delete", p, `Delete ${p.name}? The client key is forgotten and the tunnel is closed.`);
+    row.append(bCfg, bToggle, bDel); acts.append(row);
+    tr.append(name, st, el("td", p.ip, "v hide-sm"), el("td", p.endpoint || "—", "v hide-sm"), acts);
+    tb.append(tr);
+  }
+}
+
+async function act(what, p, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  try { await api("/api/peers/" + what, {pubkey: p.pubkey}); await refresh(); } catch (e) { alert(e.message); }
+}
+function showCfg(c) {
+  $("cfg-name").textContent = c.name;
+  const blob = JSON.stringify(c);
+  $("cfg-cmd").textContent = "python3 p2ptun.py join '" + blob.replace(/'/g, "'\\''") + "'";
+  $("cfg-box").classList.remove("hide");
+  $("cfg-box").scrollIntoView({behavior: "smooth", block: "center"});
+}
+async function peerCfg(p) { try { showCfg((await api("/api/peers/config", {pubkey: p.pubkey})).client); } catch (e) { alert(e.message); } }
+
+function form(id, handler) {
+  $(id).addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btns = ev.target.querySelectorAll("button"); btns.forEach(b => b.disabled = true);
+    try { await handler(Object.fromEntries(new FormData(ev.target)), ev.target); } finally { btns.forEach(b => b.disabled = false); }
+  });
+}
+
+form("f-setup", async (v) => {
+  if (v.admin_pass !== v.admin_pass2) return msg("m-setup", "Admin passwords don't match");
+  try {
+    await api("/api/setup", {ssid: v.ssid, wifi_pass: v.wifi_pass, admin_pass: v.admin_pass});
+    msg("m-setup", "Saved. The device is rebooting onto your Wi-Fi. Find its IP in your router or the serial log, then open http://<ip>/", true);
+  } catch (e) { msg("m-setup", e.message); }
+});
+form("f-login", async (v, f) => {
+  try { await api("/api/login", {password: v.password}); f.reset(); msg("m-login", ""); load(); } catch (e) { msg("m-login", e.message); }
+});
+form("f-add", async (v, f) => {
+  try { const r = await api("/api/peers/add", {name: v.name.trim(), pubkey: v.pubkey.trim()}); f.reset(); msg("m-add", ""); showCfg(r.client); refresh(); }
+  catch (e) { msg("m-add", e.message); }
+});
+form("f-pass", async (v, f) => {
+  try { await api("/api/password", v); f.reset(); msg("m-pass", "Password changed. Please log in again.", true); setTimeout(load, 1200); }
+  catch (e) { msg("m-pass", e.message); }
+});
+form("f-relays", async (v) => {
+  try { await api("/api/relays", {relays: v.relays}); msg("m-relays", "Saved. Reboot to apply.", true); } catch (e) { msg("m-relays", e.message); }
+});
+$("reboot").onclick = async () => { if (!confirm("Reboot the device? Active tunnels drop for ~15 s.")) return; try { await api("/api/reboot", {}); msg("m-relays", "Rebooting…", true); } catch (e) { msg("m-relays", e.message); } };
+$("logout").onclick = async () => { try { await api("/api/logout", {}); } catch (e) {} load(); };
+$("cfg-close").onclick = () => $("cfg-box").classList.add("hide");
+$("cfg-copy").onclick = async () => { try { await navigator.clipboard.writeText($("cfg-cmd").textContent); $("cfg-copy").textContent = "Copied"; } catch (e) { $("cfg-copy").textContent = "Select & copy manually"; } setTimeout(() => $("cfg-copy").textContent = "Copy", 1500); };
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# ESP-IDF
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+
+# tests / python
+tests/host/p2p_host
+__pycache__/
+*.pyc
+
+# client secrets
+p2ptun.json
+*.tmp

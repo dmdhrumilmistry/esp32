@@ -1,0 +1,37 @@
+menu "p2ptun"
+
+config P2PTUN_TUNNEL_PREFIX
+    string "Tunnel network /24 prefix"
+    default "10.77.0"
+    help
+        The device takes <prefix>.1, peers get <prefix>.2 .. <prefix>.254.
+
+config P2PTUN_WG_PORT
+    int "WireGuard UDP port on the device"
+    default 51820
+
+config P2PTUN_KEEPALIVE
+    int "Persistent keepalive (seconds) sent by the device to peers"
+    default 25
+
+config P2PTUN_RELAYS
+    string "Default Nostr relays (comma separated, wss://)"
+    default "wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net"
+    help
+        Relays only forward small, end-to-end encrypted "knock"/"ack" messages that
+        carry public ip:port pairs. They never see tunnel traffic. Max 3 are used.
+
+config P2PTUN_STUN_SERVERS
+    string "STUN servers (comma separated host:port)"
+    default "stun.l.google.com:19302,stun.cloudflare.com:3478"
+
+config P2PTUN_NOSTR_KIND
+    int "Nostr event kind used for signaling (ephemeral range)"
+    default 21820
+    range 20000 29999
+
+config P2PTUN_RESET_GPIO
+    int "Factory-reset button GPIO (hold LOW for 5 s while running)"
+    default 0
+
+endmenu

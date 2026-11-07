@@ -1,0 +1,2 @@
+# test-only extras (client deps are installed from client/requirements.txt)
+coincurve>=20

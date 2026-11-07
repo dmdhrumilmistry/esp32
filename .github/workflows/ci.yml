@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Crypto/protocol interop tests (host)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
+      - run: pip install -r client/requirements.txt -r tests/requirements.txt
+      - run: make -C tests/host
+      - run: python -m unittest discover -s tests -v
+
+  firmware:
+    name: Build firmware (ESP-IDF v5.3.2, esp32)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.2
+          target: esp32
+          path: firmware
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2ptun-firmware
+          path: |
+            firmware/build/p2ptun.bin
+            firmware/build/bootloader/bootloader.bin
+            firmware/build/partition_table/partition-table.bin
+            firmware/build/flasher_args.json

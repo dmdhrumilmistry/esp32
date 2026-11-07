@@ -1,0 +1,32 @@
+# --- p2ptun defaults ---
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# WireGuard: up to 8 authorized peers
+CONFIG_WIREGUARD_MAX_PEERS=8
+CONFIG_WIREGUARD_ESP_NETIF=y
+
+# Route tunnel traffic onto the LAN with source NAT
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+
+# Crypto for the signaling envelope and Nostr (BIP-340 on secp256k1)
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_POLY1305_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+CONFIG_MBEDTLS_ECP_DP_SECP256K1_ENABLED=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+# Smaller TLS footprint so 2-3 relay connections fit in RAM
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# Web UI
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=256
+
+# Time (SNTP) is required for replay protection
+CONFIG_LWIP_SNTP_MAX_SERVERS=2
+
+# Production hardening (enable once you have tested your board!):
+# CONFIG_SECURE_BOOT=y
+# CONFIG_SECURE_FLASH_ENC_ENABLED=y
+# CONFIG_NVS_ENCRYPTION=y
