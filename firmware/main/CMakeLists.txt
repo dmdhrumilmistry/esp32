@@ -8,6 +8,7 @@ idf_component_register(
          "p2p_acl.c"
          "p2p_events.c"
          "p2p_invites.c"
+         "p2p_wol.c"
          "p2p_tunnel.c"
          "p2p_signal.c"
          "p2p_auth.c"

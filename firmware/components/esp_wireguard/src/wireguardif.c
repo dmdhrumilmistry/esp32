@@ -173,6 +173,7 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
 					now = wireguard_sys_now();
 					peer->last_tx = now;
 					keypair->last_tx = now;
+					peer->tx_bytes += unpadded_len; // p2ptun patch
 				}
 
 				pbuf_free(pbuf);
@@ -312,6 +313,7 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 					now = wireguard_sys_now();
 					keypair->last_rx = now;
 					peer->last_rx = now;
+					peer->rx_bytes += src_len - WIREGUARD_AUTHTAG_LEN; // p2ptun patch
 
 					// Might need to shuffle next key --> current keypair
 					keypair_update(peer, keypair);
@@ -1115,6 +1117,8 @@ err_t wireguardif_get_peer_stats(struct netif *netif, u8_t peer_index, struct wi
 		out->last_rx = peer->last_rx;
 		out->last_tx = peer->last_tx;
 		out->last_handshake_rx = peer->last_initiation_rx;
+		out->rx_bytes = peer->rx_bytes;
+		out->tx_bytes = peer->tx_bytes;
 	}
 	return result;
 }

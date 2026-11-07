@@ -168,6 +168,10 @@ struct wireguard_peer {
 	uint32_t last_tx;
 	uint32_t last_rx;
 
+	// p2ptun patch: traffic counters (payload bytes of data packets)
+	uint64_t rx_bytes;
+	uint64_t tx_bytes;
+
 	// We set this flag on RX/TX of packets if we think that we should initiate a new handshake
 	bool send_handshake;
 };

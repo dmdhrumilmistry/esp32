@@ -24,6 +24,7 @@
 #include "p2p_tunnel.h"
 #include "p2p_web.h"
 #include "p2p_wifi.h"
+#include "mdns.h"
 
 static const char *TAG = "p2ptun";
 
@@ -139,6 +140,14 @@ void app_main(void)
     xTaskCreate(expiry_task, "expiry", 3072, NULL, 3, NULL);
     ESP_ERROR_CHECK(p2p_signal_start());
     ESP_ERROR_CHECK(p2p_web_start(false));
+
+    // Find the device on the LAN as http://p2ptun.local (best effort).
+    if (CONFIG_P2PTUN_MDNS_HOSTNAME[0] && mdns_init() == ESP_OK) {
+        mdns_hostname_set(CONFIG_P2PTUN_MDNS_HOSTNAME);
+        mdns_instance_name_set("p2ptun admin UI");
+        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+        ESP_LOGI(TAG, "mDNS: http://%s.local/", CONFIG_P2PTUN_MDNS_HOSTNAME);
+    }
     ESP_LOGI(TAG, "ready: manage peers at http://<device-ip>/ (LAN) or http://%s.1/ (tunnel)",
              CONFIG_P2PTUN_TUNNEL_PREFIX);
 }

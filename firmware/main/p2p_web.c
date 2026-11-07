@@ -18,6 +18,8 @@
 #include "p2p_crypto.h"
 #include "p2p_events.h"
 #include "p2p_invites.h"
+#include "p2p_wol.h"
+#include "esp_netif.h"
 #include "p2p_portmap.h"
 #include "p2p_signal.h"
 #include "p2p_tunnel.h"
@@ -196,6 +198,7 @@ static void client_ip(httpd_req_t *req, char *out, size_t len)
 }
 
 static bool clock_valid(void) { return time(NULL) > 1700000000; }
+static bool from_tunnel(httpd_req_t *req);
 
 #define MAX_EXPIRY_S (366L * 24 * 3600)
 
@@ -331,6 +334,8 @@ static esp_err_t h_state(httpd_req_t *req)
         cJSON_AddStringToObject(p, "acl", peers[i].acl);
         cJSON_AddNumberToObject(p, "expires", peers[i].expires);
         cJSON_AddNumberToObject(p, "denied", st.denied);
+        cJSON_AddNumberToObject(p, "rx_bytes", (double)st.rx_bytes);
+        cJSON_AddNumberToObject(p, "tx_bytes", (double)st.tx_bytes);
         cJSON_AddStringToObject(p, "last_denied", st.last_denied);
         cJSON_AddItemToArray(arr, p);
     }
@@ -339,6 +344,20 @@ static esp_err_t h_state(httpd_req_t *req)
     cJSON_AddItemToObject(o, "events", p2p_events_json());
     cJSON_AddItemToObject(o, "invites", p2p_invites_json());
     cJSON_AddStringToObject(o, "web_client", p2p_config()->web_client);
+    cJSON_AddBoolToObject(o, "ui_tunnel_only", p2p_config()->ui_tunnel_only);
+    cJSON_AddBoolToObject(o, "via_tunnel", from_tunnel(req));
+    cJSON *wol = cJSON_AddArrayToObject(o, "wol");
+    p2p_config_lock();
+    for (int i = 0; i < P2P_MAX_WOL; i++) {
+        if (!p2p_config()->wol[i].name[0]) continue;
+        char m[18];
+        p2p_format_mac(p2p_config()->wol[i].mac, m);
+        cJSON *w = cJSON_CreateObject();
+        cJSON_AddStringToObject(w, "name", p2p_config()->wol[i].name);
+        cJSON_AddStringToObject(w, "mac", m);
+        cJSON_AddItemToArray(wol, w);
+    }
+    p2p_config_unlock();
     return send_json(req, "200 OK", o);
 }
 
@@ -780,6 +799,150 @@ static esp_err_t h_index(httpd_req_t *req)
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// admin UI lockdown (tunnel only)
+// ---------------------------------------------------------------------------
+// Client IPv4 (host byte order) of this request, 0 if unknown.
+static uint32_t client_ipv4(httpd_req_t *req)
+{
+    char ip[48];
+    unsigned a, b, c, d;
+    client_ip(req, ip, sizeof(ip));
+    if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4 || a > 255 || b > 255 || c > 255 || d > 255) {
+        return 0;
+    }
+    return (a << 24) | (b << 16) | (c << 8) | d;
+}
+
+static bool from_tunnel(httpd_req_t *req)
+{
+    char dev[20];
+    unsigned a, b, c, d;
+    p2p_tunnel_peer_ip(1, dev, sizeof(dev));
+    if (sscanf(dev, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+        return false;
+    }
+    uint32_t net = (a << 24) | (b << 16) | (c << 8);
+    uint32_t ip = client_ipv4(req);
+    return ip && (ip & 0xFFFFFF00u) == net && ip != (net | 1);
+}
+
+// Every route goes through here: with "tunnel only" on, LAN clients get nothing.
+static esp_err_t h_guard(httpd_req_t *req)
+{
+    if (!s_setup_mode && p2p_config()->ui_tunnel_only && !from_tunnel(req)) {
+        return send_error(req, "403 Forbidden", "the admin UI is only reachable through the p2ptun tunnel");
+    }
+    return ((esp_err_t (*)(httpd_req_t *))req->user_ctx)(req);
+}
+
+static esp_err_t h_ui_lock(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *j = read_json(req);
+    const cJSON *on = j ? cJSON_GetObjectItem(j, "tunnel_only") : NULL;
+    esp_err_t r;
+    if (!cJSON_IsBool(on)) {
+        r = send_error(req, "400 Bad Request", "expected {\"tunnel_only\": true|false}");
+    } else if (cJSON_IsTrue(on) && !from_tunnel(req)) {
+        // Lockout protection: prove the admin can reach the UI through the tunnel first.
+        r = send_error(req, "409 Conflict", "open the admin UI through the tunnel (http://<tunnel ip of device>/) to enable this");
+    } else if (p2p_config_save_ui_tunnel_only(cJSON_IsTrue(on)) != ESP_OK) {
+        r = send_error(req, "500 Internal Server Error", "saving failed");
+    } else {
+        p2p_event(cJSON_IsTrue(on) ? "admin UI locked to the tunnel" : "admin UI reachable from the LAN again");
+        r = send_ok(req);
+    }
+    cJSON_Delete(j);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Wake-on-LAN
+// ---------------------------------------------------------------------------
+static esp_err_t send_magic_packet(const uint8_t mac[6])
+{
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t info;
+    if (!sta || esp_netif_get_ip_info(sta, &info) != ESP_OK || !info.ip.addr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t pkt[P2P_WOL_PACKET_LEN];
+    p2p_wol_packet(mac, pkt);
+    int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s < 0) {
+        return ESP_FAIL;
+    }
+    int yes = 1;
+    setsockopt(s, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+    struct sockaddr_in to = {.sin_family = AF_INET, .sin_port = htons(9)};
+    to.sin_addr.s_addr = info.ip.addr | ~info.netmask.addr; // directed LAN broadcast
+    int sent = 0;
+    for (int i = 0; i < 3; i++) { // UDP: send a few times
+        sent += sendto(s, pkt, sizeof(pkt), 0, (struct sockaddr *)&to, sizeof(to)) == (int)sizeof(pkt);
+    }
+    close(s);
+    return sent ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t h_wol(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    cJSON *j = read_json(req);
+    const char *action = j ? jstr(j, "action") : NULL, *macs = j ? jstr(j, "mac") : NULL, *name = j ? jstr(j, "name") : NULL;
+    uint8_t mac[6];
+    char pname[P2P_NAME_LEN] = "", mac_txt[18];
+    const char *err = NULL;
+    if (!action || !macs || !p2p_parse_mac(macs, mac)) err = "mac must look like aa:bb:cc:dd:ee:ff";
+    else if (!strcmp(action, "add") && !valid_name(name)) err = "name: 1-23 chars of letters, digits, space, - _ .";
+    if (!err && name) strlcpy(pname, name, sizeof(pname));
+    cJSON_Delete(j);
+    if (err) {
+        return send_error(req, "400 Bad Request", err);
+    }
+    p2p_format_mac(mac, mac_txt);
+    p2p_config_t *c = p2p_config();
+    p2p_config_lock();
+    int idx = -1, free_slot = -1;
+    for (int i = 0; i < P2P_MAX_WOL; i++) {
+        if (c->wol[i].name[0] && memcmp(c->wol[i].mac, mac, 6) == 0) idx = i;
+        if (!c->wol[i].name[0] && free_slot < 0) free_slot = i;
+    }
+    char target[P2P_NAME_LEN] = "";
+    if (idx >= 0) strlcpy(target, c->wol[idx].name, sizeof(target));
+    esp_err_t e = ESP_OK;
+    if (!strcmp(action, "add")) {
+        if (idx >= 0) err = "that MAC is already saved";
+        else if (free_slot < 0) err = "list full (8 machines)";
+        else {
+            strlcpy(c->wol[free_slot].name, pname, sizeof(c->wol[free_slot].name));
+            memcpy(c->wol[free_slot].mac, mac, 6);
+            e = p2p_config_save_wol();
+        }
+    } else if (!strcmp(action, "delete")) {
+        if (idx < 0) err = "unknown machine";
+        else {
+            memset(&c->wol[idx], 0, sizeof(c->wol[idx]));
+            e = p2p_config_save_wol();
+        }
+    } else if (strcmp(action, "wake") != 0) {
+        err = "action must be add, delete or wake";
+    }
+    p2p_config_unlock();
+    if (err) return send_error(req, "400 Bad Request", err);
+    if (e != ESP_OK) return send_error(req, "500 Internal Server Error", "saving failed");
+    if (!strcmp(action, "wake")) {
+        char who[48];
+        client_ip(req, who, sizeof(who));
+        if (send_magic_packet(mac) != ESP_OK) {
+            return send_error(req, "503 Service Unavailable", "no LAN connection to send on");
+        }
+        p2p_event("wake-on-LAN sent to %s%s%s (requested from %s)", target[0] ? target : mac_txt,
+                  target[0] ? " " : "", target[0] ? mac_txt : "", who);
+    }
+    return send_ok(req);
+}
+
 esp_err_t p2p_web_start(bool setup_mode)
 {
     s_setup_mode = setup_mode;
@@ -813,10 +976,12 @@ esp_err_t p2p_web_start(bool setup_mode)
         {"/api/invites/revoke", HTTP_POST, h_invite_revoke},
         {"/api/webclient", HTTP_POST, h_web_client},
         {"/qr.js", HTTP_GET, h_qr_js},
+        {"/api/uilock", HTTP_POST, h_ui_lock},
+        {"/api/wol", HTTP_POST, h_wol},
         {"/api/reboot", HTTP_POST, h_reboot},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
-        httpd_uri_t u = {.uri = routes[i].uri, .method = routes[i].m, .handler = routes[i].h};
+        httpd_uri_t u = {.uri = routes[i].uri, .method = routes[i].m, .handler = h_guard, .user_ctx = (void *)routes[i].h};
         httpd_register_uri_handler(srv, &u);
     }
     ESP_LOGI(TAG, "web UI started (%s mode)", setup_mode ? "setup" : "admin");

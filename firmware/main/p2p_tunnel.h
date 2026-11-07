@@ -12,6 +12,8 @@ typedef struct {
     char endpoint[24];  // last seen ip:port, "" if none
     int32_t last_rx_s;  // seconds since last packet from peer, -1 = never
     uint32_t denied;    // packets dropped by the peer's access rules
+    uint64_t rx_bytes;  // traffic since the peer was (re)loaded
+    uint64_t tx_bytes;
     char last_denied[32];
 } p2p_peer_status_t;
 

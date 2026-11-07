@@ -36,6 +36,13 @@ controls who may connect, and can cut off any active connection instantly.
   Peers can never reach each other.
 * **Expiring access:** give a guest 1 h, 8 h, 24 h, 7 days or 30 days. When it runs out the device
   blocks the peer, cuts its session and ignores its knocks.
+* **Wake-on-LAN:** save the machines on the device's LAN (name + MAC) and wake them from the UI,
+  from anywhere through the tunnel.
+* **Traffic per peer:** bytes in and out for every connected client, next to its status.
+* **Admin UI lockdown:** optionally make the web UI reachable *only* through the tunnel, so nobody
+  on the LAN can even see the login page. It can only be enabled from inside the tunnel, so you
+  can't lock yourself out.
+* **mDNS:** on the LAN the device answers at `http://p2ptun.local/`.
 * **Security event log:** admin logins (with source IP), failed logins and lockouts, accepted or
   rejected knocks, peer changes and expiries, all shown in the UI.
 * **Browser client** (`web/`, static page, no install, can be added to the home screen): creates the
@@ -62,6 +69,7 @@ The reachability panel in the device UI tells you which case you're in.
 | Revoked client keeps its tunnel | Block/Delete/expiry removes the peer from WireGuard and zeroes its session keys immediately. |
 | Authorized client reaches too much | Per-peer allowlist (protocol, address/CIDR, port range) checked on every decrypted packet before it enters the IP stack. The default is deny once any rule is set. Peer-to-peer forwarding is never allowed. |
 | Client spoofs another source address | The cryptokey routing check verifies each packet's **source** against the peer's tunnel address. Upstream checked the destination, which is fixed in the vendored copy (see `PATCHES.md`). |
+| Untrusted LAN (guest Wi-Fi, shared office) | Optional admin UI lockdown: every route answers 403 unless the client comes through the tunnel. |
 | Web UI attacks | PBKDF2-SHA256 password hash, 5-try lockout, random 256-bit `HttpOnly; SameSite=Strict` session cookie, JSON-only POST (CSRF), strict CSP, `X-Frame-Options: DENY`, no external resources, all output via `textContent`. |
 | Router port mapping exposes the device | Only the WireGuard UDP port is mapped. WireGuard silently drops anything not authenticated by an authorized key, and the web UI is never mapped. UPnP/NAT-PMP is spoken only with the default gateway, and a mapping is advertised only when its external IP matches what STUN sees. A fake answer can at worst give a wrong port, so clients fail to connect but are never redirected to another host. WireGuard authentication still applies either way. Turn it off with `CONFIG_P2PTUN_PORTMAP`. |
 | Browser client key theft | The key is created and kept in the browser (optional passphrase: PBKDF2-SHA256 310k + AES-GCM). The page loads no third-party code, and its CSP allows only `wss:` connections (relays). It also makes a WebRTC STUN request to Google/Cloudflare to learn the network's public IP, so those servers see that IP. Host it on its **own origin**: every `<user>.github.io/*` Pages site shares one origin, and so one `localStorage`. |
@@ -109,7 +117,7 @@ W wifi:   Open:     http://192.168.4.1/
 ```
 
 Join that Wi-Fi, open the page, enter your Wi-Fi credentials and an admin password. The device
-reboots onto your network. Open `http://<device-ip>/` and log in.
+reboots onto your network. Open `http://p2ptun.local/` (or `http://<device-ip>/`) and log in.
 
 ### 3. Connect a phone or any computer (one scan)
 
@@ -158,6 +166,7 @@ firmware/                      ESP-IDF project
   main/p2p_acl.c               per-peer access rules: parser + packet matcher (portable, host-tested)
   main/p2p_events.c            in-RAM security event log (admin events kept apart from knock traffic)
   main/p2p_invites.c           one-scan pairing invites (single-use, 15 min, RAM only)
+  main/p2p_wol.c               Wake-on-LAN magic packets (portable, host-tested)
   main/p2p_web.c, www/         web UI + JSON API
   main/p2p_auth.c              password hashing, sessions, lockout
   components/esp_wireguard/    vendored trombik/esp_wireguard (BSD-3) + small patch, see PATCHES.md
