@@ -53,6 +53,12 @@
 #endif
 
 #include "wireguard.h"
+
+/* p2ptun patch: decrypted-packet filter (per-peer ACL) */
+static wireguardif_rx_filter_fn s_rx_filter = NULL;
+void wireguardif_set_rx_filter(wireguardif_rx_filter_fn fn) {
+	s_rx_filter = fn;
+}
 #include "crypto.h"
 
 #define WIREGUARDIF_TIMER_MSECS 400
@@ -328,7 +334,10 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 							// Also check packet length!
 #if LWIP_IPV4
 							if (IPH_V(iphdr) == 4) {
-								ip_addr_copy_from_ip4(dest, iphdr->dest);
+								// p2ptun patch: WireGuard cryptokey routing checks the inner packet's
+								// SOURCE against the peer's allowed IPs (upstream compared the destination,
+								// which only works with 0.0.0.0/0 and lets peers spoof source addresses).
+								ip_addr_copy_from_ip4(dest, iphdr->src);
 								for (x=0; x < WIREGUARD_MAX_SRC_IPS; x++) {
 									if (peer->allowed_source_ips[x].valid) {
 										if (ip_addr_netcmp(&dest, &peer->allowed_source_ips[x].ip, ip_2_ip4(&peer->allowed_source_ips[x].mask))) {
@@ -350,6 +359,11 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 							if (header_len <= pbuf->tot_len) {
 
 								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
+								// p2ptun patch: per-peer access control before the packet enters the stack
+								if (dest_ok && s_rx_filter &&
+										!s_rx_filter((u8_t)(peer - device->peers), (const uint8_t *)pbuf->payload, header_len)) {
+									dest_ok = false;
+								}
 								if (dest_ok) {
 									// Send packet to be process by LWIP
 									ip_input(pbuf, device->netif);

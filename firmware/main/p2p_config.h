@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "sdkconfig.h"
+#include "p2p_acl.h"
 
 #define P2P_MAX_PEERS CONFIG_WIREGUARD_MAX_PEERS
 #define P2P_NAME_LEN 24
@@ -14,6 +15,9 @@ typedef struct {
     uint8_t pub[32];   // client's WireGuard public key
     uint8_t host;      // tunnel address = <prefix>.<host>; 0 = empty slot
     uint8_t enabled;   // 0 = blocked (not loaded into WireGuard)
+    uint8_t reserved[2];
+    uint32_t expires;  // unix seconds after which access is revoked automatically; 0 = never
+    char acl[P2P_ACL_TEXT_LEN]; // access rules (see p2p_acl.h); "" = full access
 } p2p_peer_t;
 
 typedef struct {

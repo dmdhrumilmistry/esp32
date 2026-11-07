@@ -26,6 +26,14 @@ controls who may connect, and can cut off any active connection instantly.
 * **Web UI** (served by the ESP32): authorize a client by pasting its public key, see who is
   connected (endpoint, last seen), **Block** (cuts the live session and refuses reconnects) or
   **Delete** a peer, and change the admin password, relays and endpoint override.
+* **Per-peer access rules:** limit each client to what it needs, e.g. `tcp:192.168.1.20:22` (SSH
+  to one host) or `lan:80-443`. Rules are enforced on the ESP32 for every packet leaving the
+  tunnel, edits apply to live sessions immediately, and dropped packets are counted per peer.
+  Peers can never reach each other.
+* **Expiring access:** give a guest 1 h, 8 h, 24 h, 7 days or 30 days. When it runs out the device
+  blocks the peer, cuts its session and ignores its knocks.
+* **Security event log:** admin logins (with source IP), failed logins and lockouts, accepted or
+  rejected knocks, peer changes and expiries, all shown in the UI.
 * **Browser client** (`web/`, static page, no install): creates the key on the phone or computer,
   does the encrypted knock from the browser and gives you a ready `p2ptun.conf` for the WireGuard app.
 
@@ -46,7 +54,9 @@ The reachability panel in the device UI tells you which case you're in.
 | Someone on the internet connects | Only WireGuard keys authorized in the UI can complete a handshake. The device never answers knocks it can't decrypt with an enabled peer's key. |
 | Relay operator snoops or tampers | Signaling is ChaCha20-Poly1305 with an X25519-derived key, so the relay only sees ciphertext. Clients use a fresh Nostr identity per knock. |
 | Replayed knock | Per-peer strictly increasing timestamps with ±120 s skew (the device syncs SNTP), plus a nonce echoed in the ack. |
-| Revoked client keeps its tunnel | Block/Delete removes the peer from WireGuard and zeroes its session keys immediately. |
+| Revoked client keeps its tunnel | Block/Delete/expiry removes the peer from WireGuard and zeroes its session keys immediately. |
+| Authorized client reaches too much | Per-peer allowlist (protocol, address/CIDR, port range) checked on every decrypted packet before it enters the IP stack. The default is deny once any rule is set. Peer-to-peer forwarding is never allowed. |
+| Client spoofs another source address | The cryptokey routing check verifies each packet's **source** against the peer's tunnel address. Upstream checked the destination, which is fixed in the vendored copy (see `PATCHES.md`). |
 | Web UI attacks | PBKDF2-SHA256 password hash, 5-try lockout, random 256-bit `HttpOnly; SameSite=Strict` session cookie, JSON-only POST (CSRF), strict CSP, `X-Frame-Options: DENY`, no external resources, all output via `textContent`. |
 | Router port mapping exposes the device | Only the WireGuard UDP port is mapped. WireGuard silently drops anything not authenticated by an authorized key, and the web UI is never mapped. The router's external IP is cross-checked with STUN, so a fake SSDP/NAT-PMP answer can't redirect clients. Turn it off with `CONFIG_P2PTUN_PORTMAP`. |
 | Browser client key theft | The key is created and kept in the browser (optional passphrase: PBKDF2-SHA256 310k + AES-GCM). The page loads no third-party code, and its CSP allows only `wss:` connections. Host it on its **own origin**: every `<user>.github.io/*` Pages site shares one origin, and so one `localStorage`. |
@@ -135,6 +145,8 @@ firmware/                      ESP-IDF project
   main/p2p_crypto.c            BIP-340 Schnorr, Nostr events, signaling envelope (portable, host-tested)
   main/p2p_stun.c              STUN Binding client (portable, host-tested)
   main/p2p_portmap*.c          NAT-PMP / UPnP-IGD port mapping + reachability (protocol code host-tested)
+  main/p2p_acl.c               per-peer access rules: parser + packet matcher (portable, host-tested)
+  main/p2p_events.c            in-RAM security event log
   main/p2p_web.c, www/         web UI + JSON API
   main/p2p_auth.c              password hashing, sessions, lockout
   components/esp_wireguard/    vendored trombik/esp_wireguard (BSD-3) + small patch, see PATCHES.md
@@ -157,6 +169,8 @@ The firmware's crypto and STUN code is compiled for the host and checked against
 * the Python client (envelope both directions, tamper and wrong-key rejection, STUN parsing),
 * the **browser client** (run under Node): X25519 (WebCrypto and fallback), ChaCha20-Poly1305 vs
   `cryptography`, Schnorr vs libsecp256k1, envelopes both ways with the C code, config parsing,
+* per-peer access rules against crafted IPv4 packets (ports, CIDRs, ICMP, IP options, fragments,
+  malformed headers, IPv6) and the rule parser's error handling,
 * NAT-PMP packets and UPnP-IGD parsing with fixtures from real routers (miniupnpd, FRITZ!Box-style,
   chunked HTTP, hostile descriptions),
 * **end-to-end rendezvous** for both the Python and the browser client: real client code ↔ a local

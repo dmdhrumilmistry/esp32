@@ -15,6 +15,7 @@
 
 #include "p2p_config.h"
 #include "p2p_crypto.h"
+#include "p2p_events.h"
 #include "p2p_portmap.h"
 #include "p2p_tunnel.h"
 
@@ -230,7 +231,7 @@ static void handle_knock(const p2p_peer_t *peer, peer_state_t *ps, const cJSON *
     // Replay protection: fresh timestamp, strictly increasing per peer.
     int64_t now = time(NULL), t = (int64_t)ts->valuedouble;
     if (!clock_valid() || llabs(now - t) > MAX_SKEW_S || t <= ps->last_ts) {
-        ESP_LOGW(TAG, "knock from '%s' rejected (stale/replayed)", peer->name);
+        p2p_event("knock from '%s' rejected: stale or replayed (check the client's clock)", peer->name);
         return;
     }
     ps->last_ts = t;
@@ -257,14 +258,13 @@ static void handle_knock(const p2p_peer_t *peer, peer_state_t *ps, const cJSON *
             port = lport;
         }
         esp_err_t err = p2p_tunnel_set_endpoint(peer->pub, ip, port);
-        ESP_LOGI(TAG, "knock from '%s' -> punching %u.%u.%u.%u:%u (%s)", peer->name, ip[0], ip[1], ip[2], ip[3],
-                 port, esp_err_to_name(err));
+        p2p_event("knock from '%s' at %u.%u.%u.%u:%u, punching (%s)", peer->name, ip[0], ip[1], ip[2], ip[3],
+                  port, esp_err_to_name(err));
         if (err != ESP_OK) {
             return; // peer not loaded in WireGuard
         }
     } else {
-        ESP_LOGI(TAG, "knock from '%s' (no endpoint: client will dial %s via %s)", peer->name,
-                 my_ep[0] ? my_ep : "?", via);
+        p2p_event("knock from '%s', answered with %s (%s)", peer->name, my_ep[0] ? my_ep : "?", via);
     }
 
     char pt[384];
@@ -321,8 +321,9 @@ static void handle_message(const char *raw)
     // (Nostr signatures are not needed for security; relays already verify them.)
     p2p_config_peers_snapshot(peers);
     for (int i = 0; i < P2P_MAX_PEERS; i++) {
-        if (!peers[i].host || !peers[i].enabled) {
-            continue;
+        if (!peers[i].host || !peers[i].enabled ||
+            (peers[i].expires && clock_valid() && time(NULL) >= (time_t)peers[i].expires)) {
+            continue; // blocked or expired peers get no answer at all
         }
         peer_state_t *ps = peer_state(peers[i].pub);
         uint8_t pt[512];

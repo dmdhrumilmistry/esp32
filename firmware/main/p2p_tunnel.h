@@ -11,6 +11,8 @@ typedef struct {
     bool up;            // has a live session
     char endpoint[24];  // last seen ip:port, "" if none
     int32_t last_rx_s;  // seconds since last packet from peer, -1 = never
+    uint32_t denied;    // packets dropped by the peer's access rules
+    char last_denied[32];
 } p2p_peer_status_t;
 
 // Call once the Wi-Fi station has an IP address.

@@ -1,5 +1,6 @@
 #include "p2p_config.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -37,6 +38,37 @@ static void get_str(nvs_handle_t h, const char *key, char *out, size_t len)
     }
 }
 
+// Peer table layout before access rules / expiry were added (NVS key "peers").
+typedef struct {
+    char name[P2P_NAME_LEN];
+    uint8_t pub[32];
+    uint8_t host;
+    uint8_t enabled;
+} p2p_peer_v1_t;
+
+static void migrate_v1_peers(nvs_handle_t h)
+{
+    p2p_peer_v1_t *old = calloc(P2P_MAX_PEERS, sizeof(*old));
+    if (!old) {
+        return;
+    }
+    if (get_blob(h, "peers", old, P2P_MAX_PEERS * sizeof(*old)) == ESP_OK) {
+        for (int i = 0; i < P2P_MAX_PEERS; i++) {
+            memcpy(s_cfg.peers[i].name, old[i].name, P2P_NAME_LEN);
+            s_cfg.peers[i].name[P2P_NAME_LEN - 1] = '\0';
+            memcpy(s_cfg.peers[i].pub, old[i].pub, 32);
+            s_cfg.peers[i].host = old[i].host;
+            s_cfg.peers[i].enabled = old[i].enabled;
+        }
+        if (nvs_set_blob(h, "peers2", s_cfg.peers, sizeof(s_cfg.peers)) == ESP_OK) {
+            nvs_erase_key(h, "peers");
+            nvs_commit(h);
+            ESP_LOGI(TAG, "migrated peer table to v2 (access rules + expiry)");
+        }
+    }
+    free(old);
+}
+
 esp_err_t p2p_config_load(void)
 {
     if (!s_lock) {
@@ -59,8 +91,9 @@ esp_err_t p2p_config_load(void)
     s_cfg.admin_set = get_blob(h, "adm_salt", s_cfg.admin_salt, 16) == ESP_OK &&
                       get_blob(h, "adm_hash", s_cfg.admin_hash, 32) == ESP_OK;
 
-    if (get_blob(h, "peers", s_cfg.peers, sizeof(s_cfg.peers)) != ESP_OK) {
+    if (get_blob(h, "peers2", s_cfg.peers, sizeof(s_cfg.peers)) != ESP_OK) {
         memset(s_cfg.peers, 0, sizeof(s_cfg.peers));
+        migrate_v1_peers(h);
     }
 
     if (get_blob(h, "wg_priv", s_cfg.wg_priv, 32) != ESP_OK) {
@@ -124,7 +157,7 @@ esp_err_t p2p_config_save_ep_override(const char *ep)
 
 esp_err_t p2p_config_save_peers(void)
 {
-    return commit("peers", s_cfg.peers, sizeof(s_cfg.peers), NULL);
+    return commit("peers2", s_cfg.peers, sizeof(s_cfg.peers), NULL);
 }
 
 esp_err_t p2p_config_factory_reset(void)

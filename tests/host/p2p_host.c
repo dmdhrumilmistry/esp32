@@ -14,6 +14,8 @@
 //   p2p_host soap-add <service_type> <ext> <int> <client> <lease> | soap-extip <file> | soap-err <file>
 //   p2p_host http <file>                                         -> "<status>\n<body>"
 //   p2p_host private <a.b.c.d>
+//   p2p_host acl-parse <rules>                                   -> "all" | "<n> rules" (rc 4 + reason)
+//   p2p_host acl-check <rules> <lan a.b.c.d/nn | -> <dev a.b.c.d> <pkt_hex>  -> allow | deny
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +23,7 @@
 #include "p2p_crypto.h"
 #include "p2p_stun.h"
 #include "p2p_portmap_proto.h"
+#include "p2p_acl.h"
 
 static int urandom(void *ctx, unsigned char *out, size_t len)
 {
@@ -188,6 +191,35 @@ int main(int argc, char **argv)
         char *body = p2p_http_body(r, n);
         if (!body) return 3;
         printf("%d\n%s", st, body);
+    } else if (!strcmp(cmd, "acl-parse") && argc == 3) {
+        p2p_acl_t acl;
+        char err[96];
+        if (!p2p_acl_parse(argv[2], &acl, err, sizeof(err))) {
+            puts(err);
+            return 4;
+        }
+        if (acl.all) puts("all"); else printf("%u rules\n", acl.n);
+    } else if (!strcmp(cmd, "acl-check") && argc == 6) {
+        p2p_acl_t acl;
+        char err[96];
+        if (!p2p_acl_parse(argv[2], &acl, err, sizeof(err))) {
+            puts(err);
+            return 4;
+        }
+        p2p_acl_env_t env = {0};
+        unsigned a, b, cc, d, bits;
+        if (strcmp(argv[3], "-") != 0) {
+            if (sscanf(argv[3], "%u.%u.%u.%u/%u", &a, &b, &cc, &d, &bits) != 5 || bits == 0 || bits > 32) return 2;
+            env.lan_mask = 0xFFFFFFFFu << (32 - bits);
+            env.lan_net = ((a << 24) | (b << 16) | (cc << 8) | d) & env.lan_mask;
+        }
+        if (sscanf(argv[4], "%u.%u.%u.%u", &a, &b, &cc, &d) != 4) return 2;
+        env.dev_ip = (a << 24) | (b << 16) | (cc << 8) | d;
+        uint8_t pkt[256];
+        size_t n = strlen(argv[5]) / 2;
+        if (n > sizeof(pkt)) return 2;
+        hexarg(argv[5], pkt, n);
+        puts(p2p_acl_allows(&acl, &env, pkt, n) ? "allow" : "deny");
     } else if (!strcmp(cmd, "private") && argc == 3) {
         unsigned a, b, c, d;
         if (sscanf(argv[2], "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 2;

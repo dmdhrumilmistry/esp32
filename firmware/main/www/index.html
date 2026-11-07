@@ -17,6 +17,8 @@ header{display:flex;align-items:center;justify-content:space-between;margin-bott
 .k{color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 .v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all}
 label{display:block;font-size:13px;color:var(--mute);margin:10px 0 4px}
+select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+.ev{display:flex;gap:10px;padding:5px 0;border-bottom:1px solid var(--line);font-size:13px}.ev .k{min-width:92px;text-transform:none}
 input,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
 textarea{font-family:ui-monospace,Menlo,monospace;font-size:12px;min-height:120px}
 button{padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;cursor:pointer}
@@ -89,6 +91,17 @@ td.v{word-break:normal;white-space:nowrap}
       <tbody id="peers"></tbody>
     </table>
     <p id="no-peers" class="k hide" style="text-transform:none">No peers yet. Add one below.</p>
+    <form id="f-edit" class="hide" style="margin-top:12px;border-top:1px solid var(--line);padding-top:8px">
+      <h2>Edit access: <span id="edit-name"></span></h2>
+      <input type="hidden" name="pubkey">
+      <div class="grid">
+        <div><label>Allowed destinations (empty = full access)</label><input name="acl" maxlength="95" autocomplete="off"></div>
+        <div><label>Access expires</label><select name="expires_in"><option value="keep">keep current</option><option value="0">never</option><option value="3600">in 1 hour</option><option value="28800">in 8 hours</option><option value="86400">in 24 hours</option><option value="604800">in 7 days</option><option value="2592000">in 30 days</option></select></div>
+      </div>
+      <p class="k" style="text-transform:none;margin:4px 0 0">Comma-separated: <code>lan</code> (the device's LAN), <code>device</code> (this web UI), <code>any</code>, or <code>[tcp|udp|icmp:]a.b.c.d[/nn][:port[-port]]</code>. Example: <code>tcp:192.168.1.20:22, 192.168.1.0/24:80-443</code>. Empty = full access.</p>
+      <div class="row" style="margin-top:12px"><button class="primary">Save (applies immediately)</button><button type="button" id="edit-cancel">Cancel</button></div>
+      <div class="msg" id="m-edit"></div>
+    </form>
   </div>
 
   <div class="card">
@@ -98,7 +111,10 @@ td.v{word-break:normal;white-space:nowrap}
       <div class="grid">
         <div><label>Name</label><input name="name" required maxlength="23" pattern="[A-Za-z0-9 _.\-]+" placeholder="laptop"></div>
         <div><label>Client WireGuard public key</label><input name="pubkey" required maxlength="44" minlength="44" placeholder="base64, 44 chars" autocomplete="off"></div>
+        <div><label>Allowed destinations (empty = full access)</label><input name="acl" maxlength="95" placeholder="e.g. lan  or  tcp:192.168.1.20:22" autocomplete="off"></div>
+        <div><label>Access expires</label><select name="expires_in"><option value="0">never</option><option value="3600">in 1 hour</option><option value="28800">in 8 hours</option><option value="86400">in 24 hours</option><option value="604800">in 7 days</option><option value="2592000">in 30 days</option></select></div>
       </div>
+      <p class="k" style="text-transform:none;margin:4px 0 0">Comma-separated: <code>lan</code> (the device's LAN), <code>device</code> (this web UI), <code>any</code>, or <code>[tcp|udp|icmp:]a.b.c.d[/nn][:port[-port]]</code>. Example: <code>tcp:192.168.1.20:22, 192.168.1.0/24:80-443</code>. Empty = full access.</p>
       <div class="row" style="margin-top:14px"><button class="primary">Authorize</button></div>
       <div class="msg" id="m-add"></div>
     </form>
@@ -110,6 +126,11 @@ td.v{word-break:normal;white-space:nowrap}
       <pre id="cfg-cmd"></pre>
       <div class="row"><button id="cfg-copy">Copy command</button><button id="cfg-close">Close</button></div>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between"><h2>Security events</h2><span class="k" style="text-transform:none">since last boot</span></div>
+    <div id="events"></div>
   </div>
 
   <div class="card">
@@ -157,6 +178,33 @@ function show(view) {
   for (const v of ["setup", "login", "admin"]) $("v-" + v).classList.toggle("hide", v !== view);
   $("logout").classList.toggle("hide", view !== "admin");
 }
+function expiryText(t) {
+  const now = state && state.now;
+  if (!now) return "expires (clock not synced)";
+  const s = t - now;
+  if (s <= 0) return "access expired";
+  if (s < 3600) return "expires in " + Math.ceil(s / 60) + " min";
+  if (s < 172800) return "expires in " + Math.round(s / 3600) + " h";
+  return "expires in " + Math.round(s / 86400) + " days";
+}
+function when(e) {
+  if (e.t) return new Date(e.t * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+  return "boot+" + e.up + "s";
+}
+function renderEvents() {
+  const box = $("events"); box.textContent = "";
+  const evs = state.events || [];
+  if (!evs.length) { box.append(el("p", "No events yet.", "k")); return; }
+  for (const e of evs) { const r = el("div", undefined, "ev"); r.append(el("span", when(e), "k"), el("span", e.m)); box.append(r); }
+}
+function editPeer(p) {
+  const f = $("f-edit");
+  $("edit-name").textContent = p.name;
+  f.pubkey.value = p.pubkey; f.acl.value = p.acl || ""; f.expires_in.value = "keep";
+  msg("m-edit", "");
+  f.classList.remove("hide");
+  f.acl.focus();
+}
 function ago(s) { if (s < 0) return "never"; if (s < 60) return s + "s ago"; if (s < 3600) return Math.floor(s / 60) + "m ago"; return Math.floor(s / 3600) + "h ago"; }
 
 async function load() {
@@ -196,20 +244,25 @@ function render() {
   for (const p of state.peers) {
     const tr = el("tr");
     const name = el("td"); name.append(el("div", p.name)); name.append(el("div", p.pubkey.slice(0, 12) + "…", "mono-k"));
+    name.append(el("div", p.acl ? "access: " + p.acl : "full access", "mono-k"));
+    if (p.expires) name.append(el("div", expiryText(p.expires), "mono-k"));
     let cls = "warn", txt = "idle";
     if (!p.enabled) { cls = "bad"; txt = "blocked"; }
     else if (p.up && p.last_rx_s >= 0 && p.last_rx_s < 180) { cls = "ok"; txt = "connected · " + ago(p.last_rx_s); }
     else if (p.last_rx_s >= 0) { txt = "last seen " + ago(p.last_rx_s); }
     const st = el("td"); st.append(el("span", "", "dot " + cls), el("span", txt));
+    if (p.denied) { const d = el("div", `${p.denied} blocked by rules`, "mono-k"); d.title = "last: " + p.last_denied; st.append(d); }
     const acts = el("td"); const row = el("div", undefined, "row");
     const bCfg = el("button", "Config"); bCfg.onclick = () => peerCfg(p);
+    const bEdit = el("button", "Edit access"); bEdit.onclick = () => editPeer(p);
     const bToggle = el("button", p.enabled ? (p.up ? "Disconnect & block" : "Block") : "Allow", p.enabled ? "danger" : "");
     bToggle.onclick = () => act(p.enabled ? "disable" : "enable", p, p.enabled ? `Block ${p.name}? Its active connection is cut immediately and it can't reconnect until allowed again.` : null);
     const bDel = el("button", "Delete", "danger"); bDel.onclick = () => act("delete", p, `Delete ${p.name}? The client key is forgotten and the tunnel is closed.`);
-    row.append(bCfg, bToggle, bDel); acts.append(row);
+    row.append(bCfg, bEdit, bToggle, bDel); acts.append(row);
     tr.append(name, st, el("td", p.ip, "v hide-sm"), el("td", p.endpoint || "—", "v hide-sm"), acts);
     tb.append(tr);
   }
+  renderEvents();
 }
 
 async function act(what, p, confirmText) {
@@ -245,13 +298,22 @@ form("f-login", async (v, f) => {
   try { await api("/api/login", {password: v.password}); f.reset(); msg("m-login", ""); load(); } catch (e) { msg("m-login", e.message); }
 });
 form("f-add", async (v, f) => {
-  try { const r = await api("/api/peers/add", {name: v.name.trim(), pubkey: v.pubkey.trim()}); f.reset(); msg("m-add", ""); showCfg(r.client); refresh(); }
+  try {
+    const r = await api("/api/peers/add", {name: v.name.trim(), pubkey: v.pubkey.trim(), acl: v.acl.trim(), expires_in: Number(v.expires_in)});
+    f.reset(); msg("m-add", ""); showCfg(r.client); refresh();
+  }
   catch (e) { msg("m-add", e.message); }
 });
 form("f-pass", async (v, f) => {
   try { await api("/api/password", v); f.reset(); msg("m-pass", "Password changed. Please log in again.", true); setTimeout(load, 1200); }
   catch (e) { msg("m-pass", e.message); }
 });
+form("f-edit", async (v, f) => {
+  const body = {pubkey: v.pubkey, acl: v.acl.trim()};
+  if (v.expires_in !== "keep") body.expires_in = Number(v.expires_in);
+  try { await api("/api/peers/update", body); f.classList.add("hide"); refresh(); } catch (e) { msg("m-edit", e.message); }
+});
+$("edit-cancel").onclick = () => $("f-edit").classList.add("hide");
 form("f-ep", async (v) => {
   try { await api("/api/endpoint", {endpoint: v.endpoint.trim()}); msg("m-ep", "Saved.", true); refresh(); } catch (e) { msg("m-ep", e.message); }
 });

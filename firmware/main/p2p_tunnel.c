@@ -20,6 +20,7 @@
 #include "wireguardif.h"
 #include "wireguard-platform.h"
 
+#include "p2p_acl.h"
 #include "p2p_config.h"
 #include "p2p_crypto.h"
 #include "p2p_stun.h"
@@ -37,9 +38,51 @@ static uint8_t s_prefix[3];
 typedef struct {
     bool used;
     uint8_t pub[32];
-    u8_t idx;
+    u8_t idx;              // WireGuard peer index
+    p2p_acl_t acl;         // compiled access rules
+    uint32_t denied;       // packets dropped by the rules
+    char last_denied[32];  // e.g. "tcp 192.168.1.5:445"
 } loaded_peer_t;
 static loaded_peer_t s_loaded[P2P_MAX_PEERS];
+static p2p_acl_env_t s_env; // TCPIP thread only
+
+// Per-peer access control: runs in the TCPIP thread for every decrypted packet.
+static bool rx_filter(u8_t peer_index, const uint8_t *pkt, size_t len)
+{
+    for (int i = 0; i < P2P_MAX_PEERS; i++) {
+        loaded_peer_t *lp = &s_loaded[i];
+        if (!lp->used || lp->idx != peer_index) {
+            continue;
+        }
+        if (p2p_acl_allows(&lp->acl, &s_env, pkt, len)) {
+            return true;
+        }
+        lp->denied++;
+        if (len >= 20) {
+            const char *proto = pkt[9] == 6 ? "tcp" : pkt[9] == 17 ? "udp" : pkt[9] == 1 ? "icmp" : "ip";
+            size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
+            if ((pkt[9] == 6 || pkt[9] == 17) && len >= ihl + 4) {
+                snprintf(lp->last_denied, sizeof(lp->last_denied), "%s %u.%u.%u.%u:%u", proto,
+                         pkt[16], pkt[17], pkt[18], pkt[19], (pkt[ihl + 2] << 8) | pkt[ihl + 3]);
+            } else {
+                snprintf(lp->last_denied, sizeof(lp->last_denied), "%s %u.%u.%u.%u", proto,
+                         pkt[16], pkt[17], pkt[18], pkt[19]);
+            }
+        }
+        return false;
+    }
+    return false; // unknown peer: shouldn't happen
+}
+
+static void compile_acl(loaded_peer_t *lp, const p2p_peer_t *p)
+{
+    char err[64];
+    if (!p2p_acl_parse(p->acl, &lp->acl, err, sizeof(err))) {
+        // Rules are validated before saving; if stored rules are somehow invalid, fail closed.
+        ESP_LOGE(TAG, "peer '%s': invalid access rules (%s), denying all traffic", p->name, err);
+        memset(&lp->acl, 0, sizeof(lp->acl));
+    }
+}
 
 // STUN state (written from the TCPIP thread hook, read elsewhere)
 static SemaphoreHandle_t s_stun_sem;
@@ -148,6 +191,8 @@ static void stun_task(void *arg)
         } else {
             ESP_LOGW(TAG, "STUN failed (UDP blocked?)");
         }
+        // Re-apply peers so access rules track the current LAN subnet (DHCP changes).
+        p2p_tunnel_sync_peers();
         // Refreshing every 20 s also keeps the NAT mapping of the WireGuard port alive.
         vTaskDelay(pdMS_TO_TICKS(ok ? 20000 : 5000));
     }
@@ -221,6 +266,7 @@ static esp_err_t do_create(void *arg)
         return ESP_FAIL;
     }
     wireguardif_set_raw_rx_hook(raw_rx_hook);
+    wireguardif_set_rx_filter(rx_filter);
     return ESP_OK;
 }
 
@@ -261,9 +307,16 @@ esp_err_t p2p_tunnel_start(void)
 }
 
 // ---------------------------------------------------------------------------
+typedef struct {
+    const p2p_peer_t *peers;
+    p2p_acl_env_t env;
+} sync_ctx_t;
+
 static esp_err_t do_sync(void *arg)
 {
-    const p2p_peer_t *peers = arg;
+    const sync_ctx_t *ctx = arg;
+    const p2p_peer_t *peers = ctx->peers;
+    s_env = ctx->env;
 
     // 1. remove peers that are gone or disabled
     for (int i = 0; i < P2P_MAX_PEERS; i++) {
@@ -274,6 +327,7 @@ static esp_err_t do_sync(void *arg)
         for (int j = 0; j < P2P_MAX_PEERS; j++) {
             if (peers[j].host && peers[j].enabled && memcmp(peers[j].pub, s_loaded[i].pub, 32) == 0) {
                 keep = true;
+                compile_acl(&s_loaded[i], &peers[j]); // rule changes apply immediately
                 break;
             }
         }
@@ -314,15 +368,29 @@ static esp_err_t do_sync(void *arg)
         p.keep_alive = CONFIG_P2PTUN_KEEPALIVE;
         u8_t idx = WIREGUARDIF_INVALID_INDEX;
         if (wireguardif_add_peer(s_wg, &p, &idx) == ERR_OK && idx != WIREGUARDIF_INVALID_INDEX) {
-            s_loaded[free_slot].used = true;
+            memset(&s_loaded[free_slot], 0, sizeof(s_loaded[free_slot]));
             s_loaded[free_slot].idx = idx;
             memcpy(s_loaded[free_slot].pub, peers[j].pub, 32);
+            compile_acl(&s_loaded[free_slot], &peers[j]);
+            s_loaded[free_slot].used = true;
             ESP_LOGI(TAG, "peer '%s' loaded (slot %u)", peers[j].name, idx);
         } else {
             ESP_LOGE(TAG, "wireguardif_add_peer failed for '%s'", peers[j].name);
         }
     }
     return ESP_OK;
+}
+
+static p2p_acl_env_t current_env(void)
+{
+    p2p_acl_env_t env = {0};
+    env.dev_ip = ((uint32_t)s_prefix[0] << 24) | ((uint32_t)s_prefix[1] << 16) | ((uint32_t)s_prefix[2] << 8) | 1;
+    esp_netif_ip_info_t info;
+    if (sta_ip(&info)) {
+        env.lan_mask = ntohl(info.netmask.addr);
+        env.lan_net = ntohl(info.ip.addr) & env.lan_mask;
+    }
+    return env;
 }
 
 void p2p_tunnel_sync_peers(void)
@@ -337,7 +405,8 @@ void p2p_tunnel_sync_peers(void)
     }
     xSemaphoreTake(sync_lock, portMAX_DELAY);
     p2p_config_peers_snapshot(snap);
-    esp_netif_tcpip_exec(do_sync, snap);
+    sync_ctx_t ctx = {.peers = snap, .env = current_env()};
+    esp_netif_tcpip_exec(do_sync, &ctx);
     xSemaphoreGive(sync_lock);
 }
 
@@ -404,6 +473,8 @@ static esp_err_t do_status(void *arg)
     }
     uint32_t last = st.last_rx > st.last_handshake_rx ? st.last_rx : st.last_handshake_rx;
     s->out->last_rx_s = last ? (int32_t)((sys_now() - last) / 1000) : -1;
+    s->out->denied = s_loaded[i].denied;
+    strlcpy(s->out->last_denied, s_loaded[i].last_denied, sizeof(s->out->last_denied));
     return ESP_OK;
 }
 
